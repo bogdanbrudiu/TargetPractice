@@ -1,0 +1,643 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Laser Target Practice</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { background: #111; color: #eee; font-family: system-ui, Arial, sans-serif; }
+    .wrap { display: grid; grid-template-columns: 2fr 1fr; gap: 16px; padding: 16px; }
+    .panel { background: #1c1c1c; border-radius: 8px; padding: 12px; }
+    img { max-width: 100%; border-radius: 8px; background: #000; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 4px 8px; border-bottom: 1px solid #333; }
+    .score { font-size: 20px; margin-top: 8px; }
+    .tabs { display: flex; border-bottom: 1px solid #333; margin-top: 12px; }
+    .tab { padding: 8px 12px; cursor: pointer; }
+    .tab.active { border-bottom: 2px solid #4fc3f7; color: #4fc3f7; }
+    .tab-content { display: none; padding-top: 12px; }
+    .tab-content.active { display: block; }
+    .form-grid { display:grid;grid-template-columns:1fr 1fr;gap:8px;align-items:center; }
+    input, select, button { background:#222; color:#eee; border:1px solid #444; border-radius:4px; padding:6px; }
+    button { cursor:pointer; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="panel">
+      <img id="frame" alt="frame" src="/frames/latest.jpg" />
+    </div>
+    <div class="panel">
+      <div class="tabs">
+        <div id="tab-results" class="tab active" onclick="switchTab('results')">Results</div>
+        <div id="tab-camera" class="tab" onclick="switchTab('camera')">Camera</div>
+        <div id="tab-target" class="tab" onclick="switchTab('target')">Target</div>
+        <div id="tab-weapon" class="tab" onclick="switchTab('weapon')">Weapon</div>
+        <div id="tab-shooting" class="tab" onclick="switchTab('shooting')">Shooting</div>
+      </div>
+      <div id="content-results" class="tab-content active">
+        <h3>Results</h3>
+        <div class="score">Total: <span id="total">0.0</span></div>
+        <table>
+          <thead><tr><th>#</th><th>X</th><th>Y</th><th>Score</th></tr></thead>
+          <tbody id="shots"></tbody>
+        </table>
+      </div>
+      <div id="content-camera" class="tab-content">
+        <h3>Camera</h3>
+        <div class="form-grid">
+          <label for="VideoWidth">VideoWidth</label>
+          <input id="VideoWidth" type="number" step="1" onchange="saveCameraConfig()" />
+          <label for="VideoHeight">VideoHeight</label>
+          <input id="VideoHeight" type="number" step="1" onchange="saveCameraConfig()" />
+          <label for="Sensitivity">Sensitivity</label>
+          <input id="Sensitivity" type="number" step="0.1" min="1" max="10" oninput="queueCameraConfigSave()" />
+          <label for="Gain">Gain</label>
+          <input id="Gain" type="number" step="0.5" min="0" max="40" oninput="queueCameraConfigSave()" />
+
+          <label>Status</label>
+          <div id="cameraApplyStatus" style="font-size:12px;color:#bbb;">&nbsp;</div>
+
+          <label for="CalibrationMode">Calibration</label>
+          <input id="CalibrationMode" type="checkbox" onchange="toggleCalibration()" />
+
+          <label for="CalibrationView">Calib view</label>
+          <select id="CalibrationView" onchange="refreshCalibrationOnce()">
+            <option value="thresh">thresh</option>
+            <option value="red">red</option>
+            <option value="gray">gray</option>
+            <option value="raw">raw</option>
+          </select>
+        </div>
+        <div style="margin-top:8px;font-size:12px;color:#bbb;line-height:1.4;">
+          Tip: crește Sensitivity dacă ratează lovituri; scade dacă apar false hits. Gain afectează luminozitatea (și, pe USB, încearcă să seteze gain-ul camerei).
+        </div>
+        <div id="calibBox" style="margin-top:10px;display:none;">
+          <div style="font-size:12px;color:#9cf;margin-bottom:6px;">Calibration view</div>
+          <img id="calibFrame" alt="calibration" style="width:100%;border-radius:8px;background:#000;" />
+        </div>
+      </div>
+      <div id="content-target" class="tab-content">
+        <h3>Target</h3>
+        <div class="form-grid">
+          <label for="targetSelect">Target</label>
+          <div style="display:flex;gap:8px;align-items:center;">
+            <select id="targetSelect" onchange="selectTarget()"></select>
+            <span id="activeTarget" style="font-size:12px;color:#9cf;"></span>
+          </div>
+          <label for="Scale">Scale</label>
+          <input id="Scale" type="number" step="0.0001" onchange="saveTargetConfig()" />
+          <label for="PositionX">PositionX</label>
+          <input id="PositionX" type="number" step="1" onchange="saveTargetConfig()" />
+          <label for="PositionY">PositionY</label>
+          <input id="PositionY" type="number" step="1" onchange="saveTargetConfig()" />
+          <label for="DistanceSimulated">DistanceSimulated</label>
+          <input id="DistanceSimulated" type="number" step="0.1" onchange="saveTargetConfig()" />
+          <label for="DistanceReal">DistanceReal</label>
+          <input id="DistanceReal" type="number" step="0.1" onchange="saveTargetConfig()" />
+          <label for="DistanceIsMetric">DistanceIsMetric</label>
+          <input id="DistanceIsMetric" type="checkbox" onchange="saveTargetConfig()" />
+
+          <label>Status</label>
+          <div id="targetApplyStatus" style="font-size:12px;color:#bbb;">&nbsp;</div>
+        </div>
+        <div style="margin-top:12px; display:flex; gap:8px; flex-wrap:wrap;">
+          <button onclick="nudge(0,-5)">Up</button>
+          <button onclick="nudge(0,5)">Down</button>
+          <button onclick="nudge(-5,0)">Left</button>
+          <button onclick="nudge(5,0)">Right</button>
+          <button onclick="scale(1.02)">Scale +</button>
+          <button onclick="scale(0.98)">Scale -</button>
+        </div>
+      </div>
+      <div id="content-weapon" class="tab-content">
+        <h3>Weapon</h3>
+        <div class="form-grid">
+          <label for="weaponSelect">Weapon</label>
+          <div style="display:flex;gap:8px;align-items:center;">
+            <select id="weaponSelect" onchange="selectWeapon()"></select>
+            <span id="activeWeapon" style="font-size:12px;color:#9cf;"></span>
+          </div>
+          <label for="WeaponName">Name</label>
+          <input id="WeaponName" type="text" oninput="queueWeaponFileSave()" />
+          <label for="WeaponCaliber">Caliber</label>
+          <input id="WeaponCaliber" type="number" step="0.01" oninput="queueWeaponFileSave()" />
+          <label for="WeaponUnit">Unit</label>
+          <select id="WeaponUnit" onchange="saveWeaponFile()">
+            <option value="mm">mm</option>
+            <option value="inch">inch</option>
+          </select>
+
+          <label></label>
+          <button onclick="saveWeaponFile()">Save weapon</button>
+
+          <label>Status</label>
+          <div id="weaponApplyStatus" style="font-size:12px;color:#bbb;">&nbsp;</div>
+        </div>
+      </div>
+      <div id="content-shooting" class="tab-content">
+        <h3>Shooting</h3>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px;">
+          <button id="btnStart" onclick="startShooting()">Start</button>
+          <button id="btnStop" onclick="stopShooting()">Stop</button>
+          <button id="btnReset" onclick="resetShooting()">Reset Results</button>
+          <div style="font-size:12px;color:#9cf;">
+            Status: <span id="shootingStatus">idle</span>
+            <span id="shootingDetails" style="color:#bbb;"></span>
+          </div>
+        </div>
+        <div class="form-grid">
+          <label for="Shooter">Shooter</label>
+          <input id="Shooter" type="text" onchange="saveShootingConfig()" />
+          <label for="Rounds">Rounds</label>
+          <input id="Rounds" type="number" step="1" onchange="saveShootingConfig()" />
+          <label for="Timer">Timer</label>
+          <input id="Timer" type="number" step="1" onchange="saveShootingConfig()" />
+          <label for="TimeLimit">TimeLimit</label>
+          <input id="TimeLimit" type="number" step="1" onchange="saveShootingConfig()" />
+          <label for="Countdown">Countdown</label>
+          <input id="Countdown" type="checkbox" onchange="saveShootingConfig()" />
+          <label for="HitLimit">HitLimit</label>
+          <input id="HitLimit" type="checkbox" onchange="saveShootingConfig()" />
+          <label for="SLH">SLH (Show Last Hit)</label>
+          <input id="SLH" type="number" step="1" onchange="saveShootingConfig()" />
+          <label for="Prepare">Prepare (sec)</label>
+          <input id="Prepare" type="number" step="1" onchange="saveShootingConfig()" />
+
+          <label>Status</label>
+          <div id="shootingApplyStatus" style="font-size:12px;color:#bbb;">&nbsp;</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script>
+    const img = document.getElementById('frame');
+    const total = document.getElementById('total');
+    const shots = document.getElementById('shots');
+    const activeTargetLabel = document.getElementById('activeTarget');
+    const activeWeaponLabel = document.getElementById('activeWeapon');
+    const shootingStatusEl = document.getElementById('shootingStatus');
+    const shootingDetailsEl = document.getElementById('shootingDetails');
+    const btnStart = document.getElementById('btnStart');
+    const btnStop = document.getElementById('btnStop');
+    const btnReset = document.getElementById('btnReset');
+    let lastFrameName = null;
+
+    function _setApplyStatus(id, text, color) {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.textContent = text || '\u00A0';
+      if (color) el.style.color = color;
+    }
+
+    function _statusApplying(id) { _setApplyStatus(id, 'Applying…', '#9cf'); }
+    function _statusApplied(id) { _setApplyStatus(id, 'Applied', '#bbb'); }
+    function _statusError(id, msg) { _setApplyStatus(id, msg ? ('Error: ' + msg) : 'Error applying', '#eee'); }
+
+    function refreshState() {
+      fetch('/api/state').then(r => r.json()).then(d => {
+        total.textContent = (d.total || 0).toFixed(1);
+        shots.innerHTML = '';
+        (d.shots || []).forEach((s, i) => {
+          const tr = document.createElement('tr');
+          tr.innerHTML = `<td>${i+1}</td><td>${s.x.toFixed(0)}</td><td>${s.y.toFixed(0)}</td><td>${s.score.toFixed(1)}</td>`;
+          shots.appendChild(tr);
+        });
+        if (d.frame_name && d.frame_name !== lastFrameName) {
+          lastFrameName = d.frame_name;
+          img.src = '/frames/' + d.frame_name;
+        }
+        if (d.active_target && activeTargetLabel) activeTargetLabel.textContent = d.active_target;
+        if (d.active_weapon && activeWeaponLabel) activeWeaponLabel.textContent = d.active_weapon;
+
+        if (shootingStatusEl) shootingStatusEl.textContent = d.shooting_status || 'idle';
+        if (shootingDetailsEl) {
+          const parts = [];
+          if ((d.shooting_status || 'idle') === 'prepare') {
+            parts.push(`(prepare: ${d.shooting_prepare_remaining || 0}s)`);
+          }
+          if ((d.shooting_status || 'idle') === 'running' || (d.shooting_status || 'idle') === 'finished') {
+            if (d.shooting_time_remaining != null) {
+              parts.push(`(time: ${d.shooting_time_remaining}s)`);
+            } else {
+              parts.push(`(time: ${(d.shooting_elapsed || 0).toFixed(0)}s)`);
+            }
+            parts.push(`(hits: ${d.shooting_hits || 0}` + (d.shooting_hits_remaining != null ? `/${(d.shooting_hits || 0) + d.shooting_hits_remaining}` : '') + ')');
+          }
+          if (d.shooting_can_record === false && (d.shooting_status || 'idle') !== 'idle') {
+            parts.push('(recording off)');
+          }
+          shootingDetailsEl.textContent = parts.length ? ' ' + parts.join(' ') : '';
+        }
+
+        // Buttons: start allowed when idle/finished; stop allowed when prepare/running; reset allowed when idle/finished
+        const st = d.shooting_status || 'idle';
+        if (btnStart) btnStart.disabled = !(st === 'idle' || st === 'finished');
+        if (btnStop) btnStop.disabled = !(st === 'prepare' || st === 'running');
+        if (btnReset) btnReset.disabled = !(st === 'idle' || st === 'finished');
+      }).catch(err => console.error('state fetch failed', err));
+    }
+    setInterval(refreshState, 400);
+    refreshState();
+
+    function loadConfig() {
+      fetch('/api/config').then(r => r.json()).then(c => {
+        if (c.DistanceSimulated != null) document.getElementById('DistanceSimulated').value = c.DistanceSimulated;
+        if (c.DistanceReal != null) document.getElementById('DistanceReal').value = c.DistanceReal;
+        if (c.DistanceIsMetric != null) document.getElementById('DistanceIsMetric').checked = !!c.DistanceIsMetric;
+        if (c.VideoWidth != null) document.getElementById('VideoWidth').value = c.VideoWidth;
+        if (c.VideoHeight != null) document.getElementById('VideoHeight').value = c.VideoHeight;
+        if (c.Sensitivity != null) document.getElementById('Sensitivity').value = c.Sensitivity;
+        if (c.Gain != null) document.getElementById('Gain').value = c.Gain;
+        if (c.Scale != null) document.getElementById('Scale').value = c.Scale;
+        if (c.PositionX != null) document.getElementById('PositionX').value = c.PositionX;
+        if (c.PositionY != null) document.getElementById('PositionY').value = c.PositionY;
+        const ts = document.getElementById('targetSelect');
+        if (c.TargetFilename && ts && ts.options.length) ts.value = c.TargetFilename;
+        const ws = document.getElementById('weaponSelect');
+        if (c.WeaponFilename && ws && ws.options.length) ws.value = c.WeaponFilename;
+        if (c.Shooter != null) document.getElementById('Shooter').value = c.Shooter;
+        if (c.Rounds != null) document.getElementById('Rounds').value = c.Rounds;
+        if (c.Timer != null) document.getElementById('Timer').value = c.Timer;
+        if (c.TimeLimit != null) document.getElementById('TimeLimit').value = c.TimeLimit;
+        if (c.Countdown != null) document.getElementById('Countdown').checked = !!c.Countdown;
+        if (c.HitLimit != null) document.getElementById('HitLimit').checked = !!c.HitLimit;
+        if (c.SLH != null) document.getElementById('SLH').value = c.SLH;
+        if (c.Prepare != null) document.getElementById('Prepare').value = c.Prepare;
+      }).catch(err => console.error('config fetch failed', err));
+    }
+
+    function saveCameraConfig() {
+      const payload = {
+        VideoWidth: parseInt(document.getElementById('VideoWidth').value),
+        VideoHeight: parseInt(document.getElementById('VideoHeight').value),
+        Sensitivity: parseFloat(document.getElementById('Sensitivity').value),
+        Gain: parseFloat(document.getElementById('Gain').value),
+      };
+      _statusApplying('cameraApplyStatus');
+      fetch('/api/config', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) })
+        .then(r => {
+          if(!r.ok) throw new Error('apply failed ' + r.status);
+          return r.json();
+        })
+        .then(cfg => {
+          _statusApplied('cameraApplyStatus');
+        })
+        .catch(err => {
+          console.error('apply error', err);
+          _statusError('cameraApplyStatus', err && err.message ? err.message : undefined);
+        });
+    }
+
+    let cameraSaveTimer = null;
+    function queueCameraConfigSave() {
+      _statusApplying('cameraApplyStatus');
+      if (cameraSaveTimer) {
+        clearTimeout(cameraSaveTimer);
+        cameraSaveTimer = null;
+      }
+      cameraSaveTimer = setTimeout(() => {
+        cameraSaveTimer = null;
+        saveCameraConfig();
+      }, 200);
+    }
+
+    let calibTimer = null;
+
+    function refreshCalibrationOnce() {
+      const enabled = document.getElementById('CalibrationMode')?.checked;
+      if (!enabled) return;
+      const img2 = document.getElementById('calibFrame');
+      if (!img2) return;
+      const view = (document.getElementById('CalibrationView')?.value) || 'thresh';
+      img2.src = '/api/calibration/frame?view=' + encodeURIComponent(view) + '&t=' + Date.now();
+    }
+
+    function toggleCalibration() {
+      const enabled = document.getElementById('CalibrationMode').checked;
+      const box = document.getElementById('calibBox');
+      const img2 = document.getElementById('calibFrame');
+      if (!box || !img2) return;
+      box.style.display = enabled ? 'block' : 'none';
+      if (calibTimer) {
+        clearInterval(calibTimer);
+        calibTimer = null;
+      }
+      if (enabled) {
+        refreshCalibrationOnce();
+        calibTimer = setInterval(refreshCalibrationOnce, 1000);
+      }
+    }
+
+    function startShooting() {
+      _statusApplying('shootingApplyStatus');
+      fetch('/api/shooting/start', { method:'POST' })
+        .then(r => r.json())
+        .then(() => {
+          _statusApplied('shootingApplyStatus');
+          refreshState();
+        })
+        .catch(err => {
+          console.error('start shooting failed', err);
+          _statusError('shootingApplyStatus', err && err.message ? err.message : undefined);
+        });
+    }
+
+    function stopShooting() {
+      _statusApplying('shootingApplyStatus');
+      fetch('/api/shooting/stop', { method:'POST' })
+        .then(r => r.json())
+        .then(() => {
+          _statusApplied('shootingApplyStatus');
+          refreshState();
+        })
+        .catch(err => {
+          console.error('stop shooting failed', err);
+          _statusError('shootingApplyStatus', err && err.message ? err.message : undefined);
+        });
+    }
+
+    function resetShooting() {
+      _statusApplying('shootingApplyStatus');
+      fetch('/api/shooting/reset', { method:'POST' })
+        .then(r => r.json())
+        .then(() => {
+          _statusApplied('shootingApplyStatus');
+          refreshState();
+        })
+        .catch(err => {
+          console.error('reset shooting failed', err);
+          _statusError('shootingApplyStatus', err && err.message ? err.message : undefined);
+        });
+    }
+
+    function saveTargetConfig() {
+      const payload = {
+        TargetFilename: document.getElementById('targetSelect').value,
+        Scale: parseFloat(document.getElementById('Scale').value),
+        PositionX: parseFloat(document.getElementById('PositionX').value),
+        PositionY: parseFloat(document.getElementById('PositionY').value),
+        DistanceSimulated: parseFloat(document.getElementById('DistanceSimulated').value),
+        DistanceReal: parseFloat(document.getElementById('DistanceReal').value),
+        DistanceIsMetric: document.getElementById('DistanceIsMetric').checked ? 1 : 0
+      };
+      _statusApplying('targetApplyStatus');
+      fetch('/api/config', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) })
+        .then(r => {
+          if(!r.ok) throw new Error('save failed ' + r.status);
+          return r.json();
+        })
+        .then(cfg => {
+          if (cfg && cfg.TargetFilename && activeTargetLabel) activeTargetLabel.textContent = cfg.TargetFilename;
+          loadConfig();
+          _statusApplied('targetApplyStatus');
+        })
+        .catch(err => {
+          console.error('save error', err);
+          _statusError('targetApplyStatus', err && err.message ? err.message : undefined);
+        });
+    }
+
+    function saveWeaponConfig() {
+      const payload = {
+        WeaponFilename: document.getElementById('weaponSelect').value,
+      };
+      _statusApplying('weaponApplyStatus');
+      fetch('/api/config', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) })
+        .then(r => {
+          if(!r.ok) throw new Error('save failed ' + r.status);
+          return r.json();
+        })
+        .then(cfg => {
+          if (cfg && cfg.WeaponFilename && activeWeaponLabel) activeWeaponLabel.textContent = cfg.WeaponFilename;
+          loadConfig();
+          _statusApplied('weaponApplyStatus');
+        })
+        .catch(err => {
+          console.error('save error', err);
+          _statusError('weaponApplyStatus', err && err.message ? err.message : undefined);
+        });
+    }
+
+    function saveShootingConfig() {
+      const payload = {
+        Shooter: document.getElementById('Shooter').value,
+        Rounds: parseInt(document.getElementById('Rounds').value),
+        Timer: parseInt(document.getElementById('Timer').value),
+        TimeLimit: parseInt(document.getElementById('TimeLimit').value),
+        Countdown: document.getElementById('Countdown').checked ? 1 : 0,
+        HitLimit: document.getElementById('HitLimit').checked ? 1 : 0,
+        SLH: parseInt(document.getElementById('SLH').value),
+        Prepare: parseInt(document.getElementById('Prepare').value),
+      };
+      _statusApplying('shootingApplyStatus');
+      fetch('/api/config', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) })
+        .then(r => {
+          if(!r.ok) throw new Error('save failed ' + r.status);
+          return r.json();
+        })
+        .then(cfg => {
+          loadConfig();
+          _statusApplied('shootingApplyStatus');
+        })
+        .catch(err => {
+          console.error('save error', err);
+          _statusError('shootingApplyStatus', err && err.message ? err.message : undefined);
+        });
+    }
+
+    function loadTargets() {
+      Promise.all([
+        fetch('/api/targets').then(r => r.json()),
+        fetch('/api/state').then(r => r.json())
+      ]).then(([d, s]) => {
+        const sel = document.getElementById('targetSelect');
+        sel.innerHTML = '';
+        (d.targets || []).forEach(t => {
+          const opt = document.createElement('option');
+          opt.value = t; opt.textContent = t; sel.appendChild(opt);
+        });
+        if (s.active_target) {
+          sel.value = s.active_target;
+          if (activeTargetLabel) activeTargetLabel.textContent = s.active_target;
+        }
+      }).catch(err => console.error('targets fetch failed', err));
+    }
+
+    function selectTarget() {
+      const name = document.getElementById('targetSelect').value;
+      _statusApplying('targetApplyStatus');
+      fetch('/api/targets/select', {
+        method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ name })
+      }).then(r => r.json()).then(d => {
+        if(d.error) {
+          _statusError('targetApplyStatus', d.error);
+          alert('Select failed: ' + d.error);
+        }
+        else {
+          if (activeTargetLabel) activeTargetLabel.textContent = d.active;
+          loadConfig();
+          _statusApplied('targetApplyStatus');
+        }
+      }).catch(err => {
+        console.error('select target error', err);
+        _statusError('targetApplyStatus', err && err.message ? err.message : undefined);
+      });
+    }
+
+    function loadWeapons() {
+      Promise.all([
+        fetch('/api/weapons').then(r => r.json()),
+        fetch('/api/state').then(r => r.json())
+      ]).then(([d, s]) => {
+        const sel = document.getElementById('weaponSelect');
+        sel.innerHTML = '';
+        (d.weapons || []).forEach(t => {
+          const opt = document.createElement('option');
+          opt.value = t; opt.textContent = t; sel.appendChild(opt);
+        });
+        if (s.active_weapon) {
+          sel.value = s.active_weapon;
+          if (activeWeaponLabel) activeWeaponLabel.textContent = s.active_weapon;
+          loadWeaponDetails(s.active_weapon);
+        }
+      }).catch(err => console.error('weapons fetch failed', err));
+    }
+
+    function selectWeapon() {
+      const name = document.getElementById('weaponSelect').value;
+      _statusApplying('weaponApplyStatus');
+      fetch('/api/weapons/select', {
+        method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ name })
+      }).then(r => r.json()).then(d => {
+        if(d.error) {
+          _statusError('weaponApplyStatus', d.error);
+          alert('Select failed: ' + d.error);
+        }
+        else {
+          if (activeWeaponLabel) activeWeaponLabel.textContent = d.active;
+          loadConfig();
+          loadWeaponDetails(name);
+          _statusApplied('weaponApplyStatus');
+        }
+      }).catch(err => {
+        console.error('select weapon error', err);
+        _statusError('weaponApplyStatus', err && err.message ? err.message : undefined);
+      });
+    }
+
+    function loadWeaponDetails(name) {
+      fetch(`/api/weapons/${encodeURIComponent(name)}`)
+        .then(r => r.json())
+        .then(w => {
+          if (w.error) return;
+          document.getElementById('WeaponName').value = w.name || '';
+          // Keep caliber editable in the weapon file's unit.
+          document.getElementById('WeaponCaliber').value = (w.caliber != null ? w.caliber : (w.caliber_mm || ''));
+          document.getElementById('WeaponUnit').value = (w.unit || 'mm');
+        }).catch(err => console.error('weapon detail error', err));
+    }
+
+    let weaponSaveTimer = null;
+    function queueWeaponFileSave() {
+      _statusApplying('weaponApplyStatus');
+      if (weaponSaveTimer) {
+        clearTimeout(weaponSaveTimer);
+        weaponSaveTimer = null;
+      }
+      weaponSaveTimer = setTimeout(() => {
+        weaponSaveTimer = null;
+        saveWeaponFile();
+      }, 250);
+    }
+
+    function saveWeaponFile() {
+      const filename = document.getElementById('weaponSelect').value;
+      if (!filename) {
+        _statusError('weaponApplyStatus', 'no weapon selected');
+        return;
+      }
+      const payload = {
+        name: document.getElementById('WeaponName').value,
+        caliber: parseFloat(document.getElementById('WeaponCaliber').value),
+        unit: document.getElementById('WeaponUnit').value,
+      };
+      if (!isFinite(payload.caliber) || payload.caliber <= 0) {
+        _statusError('weaponApplyStatus', 'invalid caliber');
+        return;
+      }
+      _statusApplying('weaponApplyStatus');
+      fetch(`/api/weapons/${encodeURIComponent(filename)}`, {
+        method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)
+      }).then(r => {
+        if(!r.ok) throw new Error('save failed ' + r.status);
+        return r.json();
+      }).then(res => {
+        if(res.error) {
+          _statusError('weaponApplyStatus', res.error);
+          alert('Save weapon failed: ' + res.error);
+        }
+        else {
+          _statusApplied('weaponApplyStatus');
+          // reload to reflect any updated parsed values and state caliber
+          loadWeaponDetails(filename);
+          refreshState();
+        }
+      }).catch(err => {
+        console.error('save weapon file error', err);
+        _statusError('weaponApplyStatus', err && err.message ? err.message : undefined);
+      });
+    }
+
+    function switchTab(name) {
+      ['results','camera','target','weapon','shooting'].forEach(t => {
+        document.getElementById(`tab-${t}`).classList.toggle('active', t===name);
+        document.getElementById(`content-${t}`).classList.toggle('active', t===name);
+      });
+    }
+
+    function nudge(dx, dy) {
+      _statusApplying('targetApplyStatus');
+      fetch('/api/target/position', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ dx, dy })
+      }).then(r => {
+        if(!r.ok) {
+          console.error('nudge failed', r.status);
+          _statusError('targetApplyStatus', '' + r.status);
+        } else {
+          loadConfig();
+          _statusApplied('targetApplyStatus');
+        }
+      }).catch(err => {
+        console.error('nudge error', err);
+        _statusError('targetApplyStatus', err && err.message ? err.message : undefined);
+      });
+    }
+
+    function scale(factor) {
+      _statusApplying('targetApplyStatus');
+      fetch('/api/target/scale', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ factor })
+      }).then(r => {
+        if(!r.ok) {
+          console.error('scale failed', r.status);
+          _statusError('targetApplyStatus', '' + r.status);
+        } else {
+          loadConfig();
+          _statusApplied('targetApplyStatus');
+        }
+      }).catch(err => {
+        console.error('scale error', err);
+        _statusError('targetApplyStatus', err && err.message ? err.message : undefined);
+      });
+    }
+
+    // initial load
+    loadTargets();
+    loadWeapons();
+    loadConfig();
+  </script>
+</body>
+</html>

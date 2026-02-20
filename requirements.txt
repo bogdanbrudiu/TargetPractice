@@ -1,0 +1,13 @@
+fastapi>=0.95,<1.0
+uvicorn[standard]>=0.20,<1.0
+opencv-python>=4.5,<5.0
+numpy>=1.24,<3.0
+Pillow>=10,<11
+jinja2>=3.1,<4
+# Optional: only used if --device provided
+pychromecast>=13,<15
+hidapi>=0.13,<1
+
+# If your network filters TLS or blocks PyPI, try a mirror:
+# pip install -r requirements.txt -i https://pypi.org/simple --timeout 60 --retries 5
+

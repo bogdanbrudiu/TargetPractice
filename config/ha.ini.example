@@ -1,0 +1,28 @@
+** Webcam settings **
+Webcam = Video Device
+FlipCamVertical = 0
+FlipCamHorizontal = 0
+VideoWidth = 1280
+VideoHeight = 720
+Sensitivity = 2.0
+Gain = 10.0
+
+** Shooting settings **
+Shooter = ShooterName
+WeaponFilename = default_weapon.gun
+Rounds = 10
+Timer = 120
+TimeLimit = 0
+Countdown = 0
+HitLimit = 0
+SLH = 5
+Prepare = 0
+
+** Target settings **
+TargetFilename = 10m_air_pistol.tgt
+Scale = 1.0
+PositionX = 0
+PositionY = 0
+DistanceSimulated = 10.0
+DistanceReal = 5.0
+DistanceIsMetric = 1

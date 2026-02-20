@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# Runtime outputs
+run/
+*.log
+*.pid
+*.bak
+
+# Local config (keep ha.ini.example in repo)
+config/ha.ini
+
+# Static mode removed; keep folder out of git if created locally
+sample/
+
+# OS / Editor
+.DS_Store
+.vscode/
