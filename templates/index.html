@@ -37,6 +37,15 @@
       </div>
       <div id="content-results" class="tab-content active">
         <h3>Results</h3>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px;">
+          <button id="btnStart" onclick="startShooting()">Start</button>
+          <button id="btnStop" onclick="stopShooting()">Stop</button>
+          <button id="btnReset" onclick="resetShooting()">Reset Results</button>
+          <div style="font-size:12px;color:#9cf;">
+            Status: <span id="shootingStatus">idle</span>
+            <span id="shootingDetails" style="color:#bbb;"></span>
+          </div>
+        </div>
         <div class="score">Total: <span id="total">0.0</span></div>
         <table>
           <thead><tr><th>#</th><th>X</th><th>Y</th><th>Score</th></tr></thead>
@@ -54,6 +63,16 @@
           <input id="Sensitivity" type="number" step="0.1" min="1" max="10" oninput="queueCameraConfigSave()" />
           <label for="Gain">Gain</label>
           <input id="Gain" type="number" step="0.5" min="0" max="40" oninput="queueCameraConfigSave()" />
+          <label for="RedSatMin">RedSatMin</label>
+          <input id="RedSatMin" type="number" step="1" min="0" max="255" oninput="queueCameraConfigSave()" />
+          <label for="RedValMin">RedValMin</label>
+          <input id="RedValMin" type="number" step="1" min="0" max="255" oninput="queueCameraConfigSave()" />
+          <label for="RedGateKernel">RedGateKernel</label>
+          <input id="RedGateKernel" type="number" step="2" min="1" max="31" oninput="queueCameraConfigSave()" />
+          <label for="WhiteSatMax">WhiteSatMax</label>
+          <input id="WhiteSatMax" type="number" step="1" min="0" max="255" oninput="queueCameraConfigSave()" />
+          <label for="WhiteValMin">WhiteValMin</label>
+          <input id="WhiteValMin" type="number" step="1" min="0" max="255" oninput="queueCameraConfigSave()" />
 
           <label>Status</label>
           <div id="cameraApplyStatus" style="font-size:12px;color:#bbb;">&nbsp;</div>
@@ -63,6 +82,7 @@
 
           <label for="CalibrationView">Calib view</label>
           <select id="CalibrationView" onchange="refreshCalibrationOnce()">
+            <option value="hybrid">hybrid</option>
             <option value="thresh">thresh</option>
             <option value="red">red</option>
             <option value="gray">gray</option>
@@ -70,7 +90,15 @@
           </select>
         </div>
         <div style="margin-top:8px;font-size:12px;color:#bbb;line-height:1.4;">
-          Tip: crește Sensitivity dacă ratează lovituri; scade dacă apar false hits. Gain afectează luminozitatea (și, pe USB, încearcă să seteze gain-ul camerei).
+          Tip: crește Sensitivity dacă ratează lovituri; scade dacă apar false hits. Gain afectează luminozitatea.
+          RedSatMin/RedValMin controlează cât de "roșu" trebuie să fie spotul; RedGateKernel lărgește zona roșie folosită în hybrid.
+          WhiteSatMax/WhiteValMin ajută când spotul pare alb pe țintă albă.
+        </div>
+        <div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+          <button onclick="captureCalibrationSnapshot()">Capture Snapshot (C)</button>
+          <button onclick="useCalibrationLive()">Use Live (L)</button>
+          <button onclick="clearCalibrationSnapshot()">Clear Snapshot</button>
+          <span id="calibSourceStatus" style="font-size:12px;color:#9cf;">Source: LIVE</span>
         </div>
         <div id="calibBox" style="margin-top:10px;display:none;">
           <div style="font-size:12px;color:#9cf;margin-bottom:6px;">Calibration view</div>
@@ -137,15 +165,6 @@
       </div>
       <div id="content-shooting" class="tab-content">
         <h3>Shooting</h3>
-        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px;">
-          <button id="btnStart" onclick="startShooting()">Start</button>
-          <button id="btnStop" onclick="stopShooting()">Stop</button>
-          <button id="btnReset" onclick="resetShooting()">Reset Results</button>
-          <div style="font-size:12px;color:#9cf;">
-            Status: <span id="shootingStatus">idle</span>
-            <span id="shootingDetails" style="color:#bbb;"></span>
-          </div>
-        </div>
         <div class="form-grid">
           <label for="Shooter">Shooter</label>
           <input id="Shooter" type="text" onchange="saveShootingConfig()" />
@@ -249,6 +268,11 @@
         if (c.VideoHeight != null) document.getElementById('VideoHeight').value = c.VideoHeight;
         if (c.Sensitivity != null) document.getElementById('Sensitivity').value = c.Sensitivity;
         if (c.Gain != null) document.getElementById('Gain').value = c.Gain;
+        if (c.RedSatMin != null) document.getElementById('RedSatMin').value = c.RedSatMin;
+        if (c.RedValMin != null) document.getElementById('RedValMin').value = c.RedValMin;
+        if (c.RedGateKernel != null) document.getElementById('RedGateKernel').value = c.RedGateKernel;
+        if (c.WhiteSatMax != null) document.getElementById('WhiteSatMax').value = c.WhiteSatMax;
+        if (c.WhiteValMin != null) document.getElementById('WhiteValMin').value = c.WhiteValMin;
         if (c.Scale != null) document.getElementById('Scale').value = c.Scale;
         if (c.PositionX != null) document.getElementById('PositionX').value = c.PositionX;
         if (c.PositionY != null) document.getElementById('PositionY').value = c.PositionY;
@@ -273,6 +297,11 @@
         VideoHeight: parseInt(document.getElementById('VideoHeight').value),
         Sensitivity: parseFloat(document.getElementById('Sensitivity').value),
         Gain: parseFloat(document.getElementById('Gain').value),
+        RedSatMin: parseInt(document.getElementById('RedSatMin').value),
+        RedValMin: parseInt(document.getElementById('RedValMin').value),
+        RedGateKernel: parseInt(document.getElementById('RedGateKernel').value),
+        WhiteSatMax: parseInt(document.getElementById('WhiteSatMax').value),
+        WhiteValMin: parseInt(document.getElementById('WhiteValMin').value),
       };
       _statusApplying('cameraApplyStatus');
       fetch('/api/config', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) })
@@ -304,6 +333,82 @@
 
     let calibTimer = null;
 
+    function _fmtSnapshotTs(ts) {
+      if (!ts) return '';
+      try {
+        return new Date(ts * 1000).toLocaleTimeString();
+      } catch (_) {
+        return '';
+      }
+    }
+
+    function refreshCalibrationSourceStatus() {
+      const statusEl = document.getElementById('calibSourceStatus');
+      if (!statusEl) return;
+      fetch('/api/calibration/snapshot').then(r => r.json()).then(s => {
+        if (!s || s.error) return;
+        if (s.mode === 'snapshot' && s.has_snapshot) {
+          const t = _fmtSnapshotTs(s.snapshot_ts);
+          statusEl.textContent = t ? (`Source: SNAPSHOT (${t})`) : 'Source: SNAPSHOT';
+          statusEl.style.color = '#f7c74f';
+        } else {
+          statusEl.textContent = 'Source: LIVE';
+          statusEl.style.color = '#9cf';
+        }
+      }).catch(() => {});
+    }
+
+    function captureCalibrationSnapshot() {
+      _statusApplying('cameraApplyStatus');
+      fetch('/api/calibration/capture', { method:'POST' })
+        .then(r => {
+          if(!r.ok) throw new Error('capture failed ' + r.status);
+          return r.json();
+        })
+        .then(() => {
+          _statusApplied('cameraApplyStatus');
+          refreshCalibrationSourceStatus();
+          refreshCalibrationOnce();
+        })
+        .catch(err => {
+          _statusError('cameraApplyStatus', err && err.message ? err.message : undefined);
+        });
+    }
+
+    function useCalibrationLive() {
+      _statusApplying('cameraApplyStatus');
+      fetch('/api/calibration/live', { method:'POST' })
+        .then(r => {
+          if(!r.ok) throw new Error('live failed ' + r.status);
+          return r.json();
+        })
+        .then(() => {
+          _statusApplied('cameraApplyStatus');
+          refreshCalibrationSourceStatus();
+          refreshCalibrationOnce();
+        })
+        .catch(err => {
+          _statusError('cameraApplyStatus', err && err.message ? err.message : undefined);
+        });
+    }
+
+    function clearCalibrationSnapshot() {
+      _statusApplying('cameraApplyStatus');
+      fetch('/api/calibration/clear', { method:'POST' })
+        .then(r => {
+          if(!r.ok) throw new Error('clear failed ' + r.status);
+          return r.json();
+        })
+        .then(() => {
+          _statusApplied('cameraApplyStatus');
+          refreshCalibrationSourceStatus();
+          refreshCalibrationOnce();
+        })
+        .catch(err => {
+          _statusError('cameraApplyStatus', err && err.message ? err.message : undefined);
+        });
+    }
+
     function refreshCalibrationOnce() {
       const enabled = document.getElementById('CalibrationMode')?.checked;
       if (!enabled) return;
@@ -324,10 +429,25 @@
         calibTimer = null;
       }
       if (enabled) {
+        refreshCalibrationSourceStatus();
         refreshCalibrationOnce();
-        calibTimer = setInterval(refreshCalibrationOnce, 1000);
+        calibTimer = setInterval(() => {
+          refreshCalibrationSourceStatus();
+          refreshCalibrationOnce();
+        }, 1000);
       }
     }
+
+    document.addEventListener('keydown', (ev) => {
+      const tag = (ev.target && ev.target.tagName ? ev.target.tagName.toLowerCase() : '');
+      if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+      if (ev.code === 'KeyC') {
+        captureCalibrationSnapshot();
+      }
+      if (ev.code === 'KeyL') {
+        useCalibrationLive();
+      }
+    });
 
     function startShooting() {
       _statusApplying('shootingApplyStatus');
@@ -638,6 +758,7 @@
     loadTargets();
     loadWeapons();
     loadConfig();
+    refreshCalibrationSourceStatus();
   </script>
 </body>
 </html>

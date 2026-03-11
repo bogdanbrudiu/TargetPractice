@@ -6,6 +6,11 @@ VideoWidth = 1280
 VideoHeight = 720
 Sensitivity = 2.0
 Gain = 10.0
+RedSatMin = 70
+RedValMin = 70
+RedGateKernel = 7
+WhiteSatMax = 16
+WhiteValMin = 240
 
 ** Shooting settings **
 Shooter = ShooterName

@@ -15,6 +15,11 @@ class AppConfig:
     video_height: Optional[int] = None
     sensitivity: Optional[float] = None
     gain: Optional[float] = None
+    red_sat_min: Optional[int] = None
+    red_val_min: Optional[int] = None
+    red_gate_kernel: Optional[int] = None
+    white_sat_max: Optional[int] = None
+    white_val_min: Optional[int] = None
     flip_vertical: Optional[int] = None
     flip_horizontal: Optional[int] = None
     distance_simulated: Optional[float] = None
@@ -71,6 +76,36 @@ def parse_ini(path: Path) -> AppConfig:
         if k == "Gain":
             try:
                 cfg.gain = float(v.replace(",", "."))
+            except ValueError:
+                pass
+            continue
+        if k == "RedSatMin":
+            try:
+                cfg.red_sat_min = int(float(v))
+            except ValueError:
+                pass
+            continue
+        if k == "RedValMin":
+            try:
+                cfg.red_val_min = int(float(v))
+            except ValueError:
+                pass
+            continue
+        if k == "RedGateKernel":
+            try:
+                cfg.red_gate_kernel = int(float(v))
+            except ValueError:
+                pass
+            continue
+        if k == "WhiteSatMax":
+            try:
+                cfg.white_sat_max = int(float(v))
+            except ValueError:
+                pass
+            continue
+        if k == "WhiteValMin":
+            try:
+                cfg.white_val_min = int(float(v))
             except ValueError:
                 pass
             continue

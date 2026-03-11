@@ -29,6 +29,14 @@ from .hid_input import HIDConfig, HIDListener
 
 # Minimum time between auto-recorded hits (to avoid multi-frame glare flooding)
 RECORD_DEBOUNCE_SECONDS = 0.10
+# Ignore detections briefly right after entering running state.
+SHOOTING_START_GRACE_SECONDS = 0.50
+# Require at least N close detections across consecutive frames before recording.
+HIT_CONFIRMATION_FRAMES = 1
+# Max pixel drift between consecutive hits to treat them as the same candidate.
+HIT_CONFIRMATION_DISTANCE_PX = 20.0
+# Re-arm auto-record only after this many consecutive no-hit frames.
+HIT_RELEASE_FRAMES = 2
 
 
 class AppState:
@@ -46,9 +54,17 @@ class AppState:
         self.last_frame_path: Optional[Path] = None
         self.last_frame_name: Optional[str] = None
         self.last_raw_frame: Optional[np.ndarray] = None
+        self.calib_frozen_frame: Optional[np.ndarray] = None
+        self.calib_frozen_ts: Optional[float] = None
+        self.calib_use_frozen: bool = False
         # detector tuning (for calibration/debug UI)
         self.detector_threshold: int = 230
         self.detector_min_area: int = 5
+        self.detector_red_sat_min: int = 70
+        self.detector_red_val_min: int = 70
+        self.detector_red_gate_kernel: int = 7
+        self.detector_white_sat_max: int = 16
+        self.detector_white_val_min: int = 240
         self.write_lock: Lock = Lock()
         self.session_lock: Lock = Lock()
         # baseline (set on first frame after auto-scale & centering)
@@ -66,6 +82,9 @@ class AppState:
         self.shooting_hit_limit_enabled: bool = False
         self.shooting_hit_limit_rounds: int = 0
         self.last_recorded_ts: float = 0.0
+        # One-shot latch to avoid repeated records from persistent hotspots.
+        self.hit_record_armed: bool = True
+        self.hit_nohit_frames: int = 0
         # Ensure a placeholder image exists so /frame never returns JSON
         try:
             if not self.latest_jpg.exists():
@@ -375,6 +394,10 @@ def _shooting_tick(now_ts: float) -> None:
             if end_ts is not None and now_ts >= end_ts:
                 state.shooting_status = "running"
                 state.shooting_running_start_ts = now_ts
+                state.last_recorded_ts = now_ts
+                state.last_hit = None
+                state.hit_record_armed = True
+                state.hit_nohit_frames = 0
 
         if getattr(state, "shooting_status", "idle") != "running":
             return
@@ -455,6 +478,11 @@ async def api_state():
                     "VideoHeight": cfg.get("VideoHeight"),
                     "Sensitivity": cfg.get("Sensitivity"),
                     "Gain": cfg.get("Gain"),
+                    "RedSatMin": cfg.get("RedSatMin"),
+                    "RedValMin": cfg.get("RedValMin"),
+                    "RedGateKernel": cfg.get("RedGateKernel"),
+                    "WhiteSatMax": cfg.get("WhiteSatMax"),
+                    "WhiteValMin": cfg.get("WhiteValMin"),
                     "Scale": cfg.get("Scale"),
                     "PositionX": cfg.get("PositionX"),
                     "PositionY": cfg.get("PositionY"),
@@ -500,6 +528,11 @@ async def api_state():
                 "VideoHeight": cfg.get("VideoHeight"),
                 "Sensitivity": cfg.get("Sensitivity"),
                 "Gain": cfg.get("Gain"),
+                "RedSatMin": cfg.get("RedSatMin"),
+                "RedValMin": cfg.get("RedValMin"),
+                "RedGateKernel": cfg.get("RedGateKernel"),
+                "WhiteSatMax": cfg.get("WhiteSatMax"),
+                "WhiteValMin": cfg.get("WhiteValMin"),
                 "Shooter": cfg.get("Shooter"),
                 "Rounds": cfg.get("Rounds"),
                 "Timer": cfg.get("Timer"),
@@ -562,17 +595,23 @@ async def api_shooting_start():
 
     # snapshot current config and freeze for this shooting run
     cfg = parse_ini(state.config_path) if state.config_path.exists() else AppConfig()
-    prepare_seconds = int(cfg.prepare or 3)
-    if prepare_seconds <= 0:
-        prepare_seconds = 3
+    # Prepare=0 should start immediately.
+    try:
+        prepare_seconds = int(cfg.prepare if cfg.prepare is not None else 0)
+    except Exception:
+        prepare_seconds = 0
+    if prepare_seconds < 0:
+        prepare_seconds = 0
 
     time_limit_enabled = bool(int(cfg.time_limit or 0))
     time_limit_seconds = int(cfg.timer or 0)
     if time_limit_enabled and time_limit_seconds <= 0:
         time_limit_seconds = 1
 
-    hit_limit_enabled = bool(int(cfg.hit_limit or 0))
     hit_limit_rounds = int(cfg.rounds or 0)
+    hit_limit_enabled_cfg = bool(int(cfg.hit_limit or 0))
+    # Rounds>0 should enforce an auto-stop even if HitLimit checkbox is off.
+    hit_limit_enabled = hit_limit_enabled_cfg or (hit_limit_rounds > 0)
     if hit_limit_enabled and hit_limit_rounds <= 0:
         hit_limit_rounds = 1
 
@@ -587,9 +626,14 @@ async def api_shooting_start():
         state.shooting_running_start_ts = None
         state.shooting_prepare_end_ts = now_ts + prepare_seconds
         state.shooting_status = "prepare" if prepare_seconds > 0 else "running"
+        state.hit_record_armed = True
+        state.hit_nohit_frames = 0
         if state.shooting_status == "running":
             state.shooting_running_start_ts = now_ts
-        state.last_recorded_ts = 0.0
+            state.last_recorded_ts = now_ts
+        else:
+            state.last_recorded_ts = 0.0
+        state.last_hit = None
 
     try:
         _shooting_tick(now_ts)
@@ -607,6 +651,8 @@ async def api_shooting_stop():
         state.shooting_status = "idle"
         state.shooting_prepare_end_ts = None
         state.shooting_running_start_ts = None
+        state.hit_record_armed = True
+        state.hit_nohit_frames = 0
     return JSONResponse({"ok": True, **_shooting_snapshot(time.time())})
 
 
@@ -630,6 +676,8 @@ async def api_shooting_reset():
         state.shooting_prepare_end_ts = None
         state.shooting_running_start_ts = None
         state.shooting_start_shot_index = 0
+        state.hit_record_armed = True
+        state.hit_nohit_frames = 0
         state.last_recorded_ts = 0.0
     return JSONResponse({"ok": True, **_shooting_snapshot(time.time())})
 
@@ -653,11 +701,20 @@ async def api_target():
 async def api_calibration_frame(view: str = "thresh"):
     """Calibration/debug frame for tuning sensitivity/gain.
 
-    view: thresh|gray|raw|red
+    view: thresh|gray|raw|red|hybrid
     """
-    if state is None or state.last_raw_frame is None:
+    if state is None:
         return JSONResponse({"error": "uninitialized"}, status_code=503)
-    frame = state.last_raw_frame
+    frame = None
+    try:
+        if getattr(state, "calib_use_frozen", False) and state.calib_frozen_frame is not None:
+            frame = state.calib_frozen_frame.copy()
+        elif state.last_raw_frame is not None:
+            frame = state.last_raw_frame.copy()
+    except Exception:
+        frame = state.last_raw_frame
+    if frame is None:
+        return JSONResponse({"error": "uninitialized"}, status_code=503)
 
     # Apply the same gain multiplier as run_loop (best-effort)
     gain_alpha = None
@@ -688,15 +745,24 @@ async def api_calibration_frame(view: str = "thresh"):
 
     thr = int(getattr(state, "detector_threshold", 230))
     min_area = int(getattr(state, "detector_min_area", 5))
+    red_sat_min = int(getattr(state, "detector_red_sat_min", 70))
+    red_val_min = int(getattr(state, "detector_red_val_min", 70))
+    red_gate_kernel = int(getattr(state, "detector_red_gate_kernel", 7))
+    white_sat_max = int(getattr(state, "detector_white_sat_max", 16))
+    white_val_min = int(getattr(state, "detector_white_val_min", 240))
+    if red_gate_kernel < 1:
+        red_gate_kernel = 1
+    if (red_gate_kernel % 2) == 0:
+        red_gate_kernel += 1
     img_area = float(frame.shape[0] * frame.shape[1])
     max_area = max(float(min_area), img_area * 0.02)
 
     if view == "red":
         # Mirror the detector's red masking (HSV) so tuning is easier.
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        lower1 = (0, 70, 70)
+        lower1 = (0, red_sat_min, red_val_min)
         upper1 = (10, 255, 255)
-        lower2 = (170, 70, 70)
+        lower2 = (170, red_sat_min, red_val_min)
         upper2 = (179, 255, 255)
         m1 = cv2.inRange(hsv, lower1, upper1)
         m2 = cv2.inRange(hsv, lower2, upper2)
@@ -731,10 +797,73 @@ async def api_calibration_frame(view: str = "thresh"):
 
         cv2.putText(
             out,
-            f"RED MASK  MIN_AREA={min_area}  CNT={total_cnts}  KEPT={kept}",
+            f"RED MASK  SAT>={red_sat_min} VAL>={red_val_min}  MIN_AREA={min_area}  CNT={total_cnts}  KEPT={kept}",
             (10, 22),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.55,
+            (0, 255, 255),
+            2,
+            cv2.LINE_AA,
+        )
+        return _jpeg_response(out)
+
+    if view == "hybrid":
+        # Mirror detector's hybrid path: threshold AND dilated red gate.
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        lower1 = (0, red_sat_min, red_val_min)
+        upper1 = (10, 255, 255)
+        lower2 = (170, red_sat_min, red_val_min)
+        upper2 = (179, 255, 255)
+        m1 = cv2.inRange(hsv, lower1, upper1)
+        m2 = cv2.inRange(hsv, lower2, upper2)
+        red_mask = cv2.bitwise_or(m1, m2)
+        kernel = np.ones((3, 3), np.uint8)
+        red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_OPEN, kernel, iterations=1)
+        red_mask = cv2.dilate(red_mask, kernel, iterations=1)
+        red_gate = cv2.dilate(red_mask, np.ones((red_gate_kernel, red_gate_kernel), np.uint8), iterations=1)
+        white_mask = cv2.inRange(
+            hsv,
+            (0, 0, white_val_min),
+            (179, white_sat_max, 255),
+        )
+        top_hat = cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, np.ones((9, 9), np.uint8))
+        _, white_local = cv2.threshold(top_hat, 12, 255, cv2.THRESH_BINARY)
+        white_mask = cv2.bitwise_and(white_mask, white_local)
+        color_gate = cv2.bitwise_or(red_gate, white_mask)
+
+        _, th = cv2.threshold(blur, thr, 255, cv2.THRESH_BINARY)
+        hybrid = cv2.bitwise_and(th, color_gate)
+        hybrid = cv2.dilate(hybrid, kernel, iterations=1)
+
+        cnts, _ = cv2.findContours(hybrid, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        out = cv2.cvtColor(hybrid, cv2.COLOR_GRAY2BGR)
+        total_cnts = len(cnts)
+        kept = 0
+        best = None
+        best_area = 0.0
+        for c in cnts:
+            area = float(cv2.contourArea(c))
+            if area < float(min_area) or area > float(max_area):
+                continue
+            kept += 1
+            if area > best_area:
+                best = c
+                best_area = area
+            cv2.drawContours(out, [c], -1, (0, 255, 0), 1)
+
+        if best is not None:
+            M = cv2.moments(best)
+            if M["m00"] > 0:
+                cx = int(M["m10"] / M["m00"])
+                cy = int(M["m01"] / M["m00"])
+                cv2.circle(out, (cx, cy), 5, (0, 0, 255), -1)
+
+        cv2.putText(
+            out,
+            f"HYBRID=T&(RED|WHITE)  RED(k={red_gate_kernel},S>={red_sat_min},V>={red_val_min}) WHITE(S<={white_sat_max},V>={white_val_min}) THRESH={thr} MIN_AREA={min_area} CNT={total_cnts} KEPT={kept}",
+            (10, 22),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
             (0, 255, 255),
             2,
             cv2.LINE_AA,
@@ -781,6 +910,50 @@ async def api_calibration_frame(view: str = "thresh"):
     return _jpeg_response(out)
 
 
+@app.get("/api/calibration/snapshot")
+async def api_calibration_snapshot_state():
+    if state is None:
+        return JSONResponse({"error": "uninitialized"}, status_code=503)
+    return JSONResponse({
+        "mode": ("snapshot" if getattr(state, "calib_use_frozen", False) else "live"),
+        "has_snapshot": state.calib_frozen_frame is not None,
+        "snapshot_ts": getattr(state, "calib_frozen_ts", None),
+    })
+
+
+@app.post("/api/calibration/capture")
+async def api_calibration_capture():
+    if state is None:
+        return JSONResponse({"error": "uninitialized"}, status_code=503)
+    if state.last_raw_frame is None:
+        return JSONResponse({"error": "no frame yet"}, status_code=409)
+    try:
+        state.calib_frozen_frame = state.last_raw_frame.copy()
+    except Exception:
+        state.calib_frozen_frame = state.last_raw_frame
+    state.calib_frozen_ts = time.time()
+    state.calib_use_frozen = True
+    return JSONResponse({"ok": True, "mode": "snapshot", "snapshot_ts": state.calib_frozen_ts})
+
+
+@app.post("/api/calibration/live")
+async def api_calibration_live():
+    if state is None:
+        return JSONResponse({"error": "uninitialized"}, status_code=503)
+    state.calib_use_frozen = False
+    return JSONResponse({"ok": True, "mode": "live", "has_snapshot": state.calib_frozen_frame is not None})
+
+
+@app.post("/api/calibration/clear")
+async def api_calibration_clear():
+    if state is None:
+        return JSONResponse({"error": "uninitialized"}, status_code=503)
+    state.calib_frozen_frame = None
+    state.calib_frozen_ts = None
+    state.calib_use_frozen = False
+    return JSONResponse({"ok": True, "mode": "live", "has_snapshot": False})
+
+
 def _read_target_settings(cfg_path: Path) -> dict:
     cfg = parse_ini(cfg_path)
     return {
@@ -791,6 +964,11 @@ def _read_target_settings(cfg_path: Path) -> dict:
         "VideoHeight": cfg.video_height,
         "Sensitivity": cfg.sensitivity,
         "Gain": cfg.gain,
+        "RedSatMin": (cfg.red_sat_min if cfg.red_sat_min is not None else 70),
+        "RedValMin": (cfg.red_val_min if cfg.red_val_min is not None else 70),
+        "RedGateKernel": (cfg.red_gate_kernel if cfg.red_gate_kernel is not None else 7),
+        "WhiteSatMax": (cfg.white_sat_max if cfg.white_sat_max is not None else 16),
+        "WhiteValMin": (cfg.white_val_min if cfg.white_val_min is not None else 240),
         "Scale": cfg.scale,
         "PositionX": cfg.position_x,
         "PositionY": cfg.position_y,
@@ -885,6 +1063,11 @@ async def api_set_config(payload: dict = Body(...)):
         "VideoHeight",
         "Sensitivity",
         "Gain",
+        "RedSatMin",
+        "RedValMin",
+        "RedGateKernel",
+        "WhiteSatMax",
+        "WhiteValMin",
         "Scale",
         "PositionX",
         "PositionY",
@@ -909,7 +1092,7 @@ async def api_set_config(payload: dict = Body(...)):
     for key in ("DistanceSimulated", "DistanceReal", "Scale", "PositionX", "PositionY", "VideoWidth", "VideoHeight"):
         if key in updates and updates[key] is not None:
             updates[key] = _num(updates[key])
-    for key in ("Sensitivity", "Gain"):
+    for key in ("Sensitivity", "Gain", "RedSatMin", "RedValMin", "RedGateKernel", "WhiteSatMax", "WhiteValMin"):
         if key in updates and updates[key] is not None:
             updates[key] = _num(updates[key])
     if "DistanceIsMetric" in updates and updates["DistanceIsMetric"] is not None:
@@ -918,7 +1101,7 @@ async def api_set_config(payload: dict = Body(...)):
         except Exception:
             pass
     # integer-like shooting settings
-    for key in ("Rounds", "Timer", "TimeLimit", "Countdown", "HitLimit", "SLH", "Prepare"):
+    for key in ("Rounds", "Timer", "TimeLimit", "Countdown", "HitLimit", "SLH", "Prepare", "RedSatMin", "RedValMin", "RedGateKernel", "WhiteSatMax", "WhiteValMin"):
         if key in updates and updates[key] is not None:
             try:
                 updates[key] = int(float(updates[key]))
@@ -1232,7 +1415,34 @@ def run_loop(camera_index: int,
         threshold = max(160, min(254, threshold))
         min_area = int(round(12 - (s - 1.0) * 1.0))    # ~12..3
         min_area = max(2, min(50, min_area))
-        return BrightSpotDetector(threshold=threshold, min_area=min_area)
+        red_sat_min = 70
+        red_val_min = 70
+        red_gate_kernel = 7
+        white_sat_max = 16
+        white_val_min = 240
+        if cfg is not None:
+            try:
+                if cfg.red_sat_min is not None:
+                    red_sat_min = int(cfg.red_sat_min)
+                if cfg.red_val_min is not None:
+                    red_val_min = int(cfg.red_val_min)
+                if cfg.red_gate_kernel is not None:
+                    red_gate_kernel = int(cfg.red_gate_kernel)
+                if cfg.white_sat_max is not None:
+                    white_sat_max = int(cfg.white_sat_max)
+                if cfg.white_val_min is not None:
+                    white_val_min = int(cfg.white_val_min)
+            except Exception:
+                pass
+        return BrightSpotDetector(
+            threshold=threshold,
+            min_area=min_area,
+            red_sat_min=red_sat_min,
+            red_val_min=red_val_min,
+            red_gate_kernel=red_gate_kernel,
+            white_sat_max=white_sat_max,
+            white_val_min=white_val_min,
+        )
 
     det = _detector_from_cfg(app_cfg)
 
@@ -1255,6 +1465,11 @@ def run_loop(camera_index: int,
     try:
         state.detector_threshold = int(getattr(det, "threshold", state.detector_threshold))
         state.detector_min_area = int(getattr(det, "min_area", state.detector_min_area))
+        state.detector_red_sat_min = int(getattr(det, "red_sat_min", state.detector_red_sat_min))
+        state.detector_red_val_min = int(getattr(det, "red_val_min", state.detector_red_val_min))
+        state.detector_red_gate_kernel = int(getattr(det, "red_gate_kernel", state.detector_red_gate_kernel))
+        state.detector_white_sat_max = int(getattr(det, "white_sat_max", state.detector_white_sat_max))
+        state.detector_white_val_min = int(getattr(det, "white_val_min", state.detector_white_val_min))
     except Exception:
         pass
 
@@ -1265,6 +1480,9 @@ def run_loop(camera_index: int,
         with state.session_lock:
             # Match the UI's record gating: only count hits while running.
             if getattr(state, "shooting_status", "idle") != "running":
+                return
+            rs = getattr(state, "shooting_running_start_ts", None)
+            if rs is not None and (time.time() - float(rs)) < SHOOTING_START_GRACE_SECONDS:
                 return
             if state.last_hit is None:
                 return
@@ -1304,6 +1522,11 @@ def run_loop(camera_index: int,
         try:
             state.detector_threshold = int(getattr(det, "threshold", state.detector_threshold))
             state.detector_min_area = int(getattr(det, "min_area", state.detector_min_area))
+            state.detector_red_sat_min = int(getattr(det, "red_sat_min", state.detector_red_sat_min))
+            state.detector_red_val_min = int(getattr(det, "red_val_min", state.detector_red_val_min))
+            state.detector_red_gate_kernel = int(getattr(det, "red_gate_kernel", state.detector_red_gate_kernel))
+            state.detector_white_sat_max = int(getattr(det, "white_sat_max", state.detector_white_sat_max))
+            state.detector_white_val_min = int(getattr(det, "white_val_min", state.detector_white_val_min))
         except Exception:
             pass
         gain_alpha = None
@@ -1316,6 +1539,9 @@ def run_loop(camera_index: int,
 
     # initial gain from config
     _refresh_cfg_if_changed()
+
+    prev_hit_xy: Optional[Tuple[float, float]] = None
+    stable_hit_frames = 0
 
     for frame in src.frames():
         _refresh_cfg_if_changed()
@@ -1368,13 +1594,46 @@ def run_loop(camera_index: int,
             hit_xy = (hit.x, hit.y)
             score = tgt.get_points(hit.x, hit.y, current_caliber_mm)
             state.last_hit = hit
+            if prev_hit_xy is None:
+                stable_hit_frames = 1
+            else:
+                dx = float(hit.x) - float(prev_hit_xy[0])
+                dy = float(hit.y) - float(prev_hit_xy[1])
+                if (dx * dx + dy * dy) <= (HIT_CONFIRMATION_DISTANCE_PX * HIT_CONFIRMATION_DISTANCE_PX):
+                    stable_hit_frames += 1
+                else:
+                    stable_hit_frames = 1
+            prev_hit_xy = (float(hit.x), float(hit.y))
             # Auto-record hits only while shooting is running
             with state.session_lock:
                 can_record = getattr(state, "shooting_status", "idle") == "running"
+                running_start = getattr(state, "shooting_running_start_ts", None)
+                record_armed = bool(getattr(state, "hit_record_armed", True))
+                past_start_grace = (
+                    running_start is not None
+                    and (now_ts - float(running_start)) >= SHOOTING_START_GRACE_SECONDS
+                )
                 # simple debounce: avoid flooding on static frames or multi-frame glare
-                if can_record and (now_ts - float(getattr(state, "last_recorded_ts", 0.0))) >= RECORD_DEBOUNCE_SECONDS:
+                if (
+                    can_record
+                    and past_start_grace
+                    and record_armed
+                    and stable_hit_frames >= HIT_CONFIRMATION_FRAMES
+                    and (now_ts - float(getattr(state, "last_recorded_ts", 0.0))) >= RECORD_DEBOUNCE_SECONDS
+                ):
                     state.session.add(x=hit.x, y=hit.y, score=score)
                     state.last_recorded_ts = now_ts
+                    state.hit_record_armed = False
+                    state.hit_nohit_frames = 0
+                    stable_hit_frames = 0
+        else:
+            prev_hit_xy = None
+            stable_hit_frames = 0
+            with state.session_lock:
+                miss_frames = int(getattr(state, "hit_nohit_frames", 0)) + 1
+                state.hit_nohit_frames = miss_frames
+                if miss_frames >= HIT_RELEASE_FRAMES:
+                    state.hit_record_armed = True
 
         # Decide which recorded shots to draw (SLH = show last N hits).
         shots_to_draw: list[dict] = []
