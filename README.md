@@ -34,13 +34,7 @@ cp config/ha.ini.example config/ha.ini
 Run with a USB camera:
 
 ```bash
-python3 -m targetweb.server \
-  --target data/targets/10m_air_pistol.tgt \
-  --camera-index 0 \
-  --latest-dir run \
-  --host 127.0.0.1 \
-  --port 8000 \
-  --no-open
+python3 -m targetweb.server  --target data/targets/10m_air_pistol.tgt  --camera-index 0  --latest-dir run  --host 127.0.0.1 --port 8000  --no-open
 ```
 
 Open http://localhost:8000/ in a browser.

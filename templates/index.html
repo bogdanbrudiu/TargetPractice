@@ -59,19 +59,19 @@
           <input id="VideoWidth" type="number" step="1" onchange="saveCameraConfig()" />
           <label for="VideoHeight">VideoHeight</label>
           <input id="VideoHeight" type="number" step="1" onchange="saveCameraConfig()" />
-          <label for="Sensitivity">Sensitivity</label>
+          <label for="Sensitivity">Detection Ease</label>
           <input id="Sensitivity" type="number" step="0.1" min="1" max="10" oninput="queueCameraConfigSave()" />
-          <label for="Gain">Gain</label>
+          <label for="Gain">Camera Gain / Brightness</label>
           <input id="Gain" type="number" step="0.5" min="0" max="40" oninput="queueCameraConfigSave()" />
-          <label for="RedSatMin">RedSatMin</label>
+          <label for="RedSatMin">How Red It Must Be</label>
           <input id="RedSatMin" type="number" step="1" min="0" max="255" oninput="queueCameraConfigSave()" />
-          <label for="RedValMin">RedValMin</label>
+          <label for="RedValMin">Minimum Red Brightness</label>
           <input id="RedValMin" type="number" step="1" min="0" max="255" oninput="queueCameraConfigSave()" />
-          <label for="RedGateKernel">RedGateKernel</label>
+          <label for="RedGateKernel">Red Bloom Reach</label>
           <input id="RedGateKernel" type="number" step="2" min="1" max="31" oninput="queueCameraConfigSave()" />
-          <label for="WhiteSatMax">WhiteSatMax</label>
+          <label for="WhiteSatMax">How Neutral White Can Be</label>
           <input id="WhiteSatMax" type="number" step="1" min="0" max="255" oninput="queueCameraConfigSave()" />
-          <label for="WhiteValMin">WhiteValMin</label>
+          <label for="WhiteValMin">Minimum White-Core Brightness</label>
           <input id="WhiteValMin" type="number" step="1" min="0" max="255" oninput="queueCameraConfigSave()" />
 
           <label>Status</label>
@@ -79,26 +79,45 @@
 
           <label for="CalibrationMode">Calibration</label>
           <input id="CalibrationMode" type="checkbox" onchange="toggleCalibration()" />
-
-          <label for="CalibrationView">Calib view</label>
-          <select id="CalibrationView" onchange="refreshCalibrationOnce()">
-            <option value="hybrid">hybrid</option>
-            <option value="thresh">thresh</option>
-            <option value="red">red</option>
-            <option value="gray">gray</option>
-            <option value="raw">raw</option>
-          </select>
         </div>
-        <div style="margin-top:8px;font-size:12px;color:#bbb;line-height:1.4;">
-          Tip: crește Sensitivity dacă ratează lovituri; scade dacă apar false hits. Gain afectează luminozitatea.
-          RedSatMin/RedValMin controlează cât de "roșu" trebuie să fie spotul; RedGateKernel lărgește zona roșie folosită în hybrid.
-          WhiteSatMax/WhiteValMin ajută când spotul pare alb pe țintă albă.
-        </div>
-        <div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-          <button onclick="captureCalibrationSnapshot()">Capture Snapshot (C)</button>
-          <button onclick="useCalibrationLive()">Use Live (L)</button>
-          <button onclick="clearCalibrationSnapshot()">Clear Snapshot</button>
-          <span id="calibSourceStatus" style="font-size:12px;color:#9cf;">Source: LIVE</span>
+        <div id="calibrationControls" style="display:none;">
+          <div class="form-grid" style="margin-top:8px;">
+            <label for="CalibrationView">Calibration View</label>
+            <select id="CalibrationView" onchange="refreshCalibrationOnce()">
+              <option value="hybrid">Hybrid Final Detection</option>
+              <option value="thresh">Brightness Threshold Only</option>
+              <option value="red">Red Laser Mask Only</option>
+              <option value="gray">Gray / Blur</option>
+              <option value="raw">Raw Camera</option>
+            </select>
+          </div>
+          <div style="margin-top:8px;font-size:12px;color:#bbb;line-height:1.4;">
+            <b>Detection Ease</b>: mai mare inseamna detectie mai usoara; mai mic inseamna mai stricta.
+            <b>Camera Gain / Brightness</b>: mareste sau scade luminozitatea imaginii.
+            <b>How Red It Must Be</b> si <b>Minimum Red Brightness</b>: filtreaza ce este acceptat ca rosu-laser.
+            <b>Red Bloom Reach</b>: cat de mult poate "trage" detectorul din halo-ul rosu spre zona alba supraexpusa.
+            <b>How Neutral White Can Be</b> si <b>Minimum White-Core Brightness</b>: ajuta cand miezul laserului pare alb, nu rosu.
+          </div>
+          <div id="calibLiveControls" style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+            <button onclick="captureCalibrationSnapshot()">Capture Snapshot (C)</button>
+            <button id="calibUseLatestBtn" onclick="useLatestCalibrationSnapshot()" disabled>Open Latest Snapshot</button>
+          </div>
+          <div id="calibSnapshotControls" style="margin-top:8px;display:none;gap:8px;align-items:center;flex-wrap:wrap;">
+            <button id="calibPrevBtn" onclick="prevCalibrationSnapshot()">Prev Snapshot</button>
+            <button id="calibNextBtn" onclick="nextCalibrationSnapshot()">Next Snapshot</button>
+            <label for="calibSnapshotSelect" style="font-size:12px;color:#bbb;">Snapshot</label>
+            <select id="calibSnapshotSelect" onchange="selectCalibrationSnapshotFromDropdown()" style="min-width:240px;height:32px;padding:4px 8px;background:#1b1b1b;color:#eee;border:1px solid #555;border-radius:6px;">
+              <option value="">Loading snapshots...</option>
+            </select>
+            <button onclick="useCalibrationLive()">Use Live (L)</button>
+            <button onclick="clearCalibrationSnapshot()">Delete Current Snapshot</button>
+          </div>
+          <div style="margin-top:6px;font-size:12px;color:#bbb;line-height:1.4;">
+            Shortcuts: <b>C</b> capture, <b>L</b> live, <b>,</b>/<b>.</b> prev/next (cand focusul e pe dropdown).
+            Mereu disponibile: <b>Alt+Left</b>/<b>Alt+Right</b> pentru prev/next.
+          </div>
+          <div id="calibSourceStatus" style="margin-top:6px;font-size:12px;color:#9cf;font-weight:700;">Source: LIVE</div>
+          <div id="calibSnapshotDiskInfo" style="margin-top:6px;font-size:12px;color:#8fd;word-break:break-all;">Snapshots: in-memory only</div>
         </div>
         <div id="calibBox" style="margin-top:10px;display:none;">
           <div style="font-size:12px;color:#9cf;margin-bottom:6px;">Calibration view</div>
@@ -332,6 +351,8 @@
     }
 
     let calibTimer = null;
+    let calibSnapshotSelectSync = false;
+    let calibSnapshotCount = 0;
 
     function _fmtSnapshotTs(ts) {
       if (!ts) return '';
@@ -344,18 +365,113 @@
 
     function refreshCalibrationSourceStatus() {
       const statusEl = document.getElementById('calibSourceStatus');
-      if (!statusEl) return;
-      fetch('/api/calibration/snapshot').then(r => r.json()).then(s => {
+      const prevBtn = document.getElementById('calibPrevBtn');
+      const nextBtn = document.getElementById('calibNextBtn');
+      const useLatestBtn = document.getElementById('calibUseLatestBtn');
+      const liveControls = document.getElementById('calibLiveControls');
+      const snapshotControls = document.getElementById('calibSnapshotControls');
+      const sel = document.getElementById('calibSnapshotSelect');
+      const diskInfoEl = document.getElementById('calibSnapshotDiskInfo');
+      if (!statusEl) return Promise.resolve(null);
+      return fetch('/api/calibration/snapshot').then(r => r.json()).then(s => {
         if (!s || s.error) return;
-        if (s.mode === 'snapshot' && s.has_snapshot) {
+        const count = (typeof s.snapshot_count === 'number') ? s.snapshot_count : 0;
+        calibSnapshotCount = count;
+        const canPrev = !!s.can_prev;
+        const canNext = !!s.can_next;
+        if (prevBtn) prevBtn.disabled = !canPrev;
+        if (nextBtn) nextBtn.disabled = !canNext;
+        if (useLatestBtn) useLatestBtn.disabled = count <= 0;
+        if (liveControls && snapshotControls) {
+          const isSnapshotMode = (s.mode === 'snapshot' && s.has_snapshot && count > 0);
+          liveControls.style.display = isSnapshotMode ? 'none' : 'flex';
+          snapshotControls.style.display = isSnapshotMode ? 'flex' : 'none';
+        }
+        if (sel) {
+          const snapshots = Array.isArray(s.snapshots) ? s.snapshots : [];
+          const currentValue = sel.value;
+          calibSnapshotSelectSync = true;
+          sel.innerHTML = '';
+          if (snapshots.length === 0) {
+            const o = document.createElement('option');
+            o.value = '';
+            o.textContent = 'No snapshots';
+            sel.appendChild(o);
+            sel.disabled = true;
+          } else {
+            snapshots.forEach((item, i) => {
+              const o = document.createElement('option');
+              o.value = String(item.index);
+              const t = _fmtSnapshotTs(item.ts);
+              const name = item.name ? (` - ${item.name}`) : '';
+              o.textContent = t ? (`Snapshot ${i + 1} (${t})${name}`) : (`Snapshot ${i + 1}${name}`);
+              sel.appendChild(o);
+            });
+            sel.disabled = false;
+            const idxValue = String((typeof s.snapshot_index === 'number') ? s.snapshot_index : 0);
+            sel.value = (snapshots.some(x => String(x.index) === idxValue) ? idxValue : currentValue);
+            if (!sel.value && snapshots.length > 0) sel.value = String(snapshots[0].index);
+          }
+          calibSnapshotSelectSync = false;
+        }
+        if (s.mode === 'snapshot' && s.has_snapshot && s.snapshot_count > 0) {
           const t = _fmtSnapshotTs(s.snapshot_ts);
-          statusEl.textContent = t ? (`Source: SNAPSHOT (${t})`) : 'Source: SNAPSHOT';
+          const idx = (typeof s.snapshot_index === 'number') ? (s.snapshot_index + 1) : 0;
+          const cnt = count;
+          const label = `Source: SNAPSHOT ${idx}/${cnt}`;
+          statusEl.textContent = t ? (`${label} (${t})`) : label;
           statusEl.style.color = '#f7c74f';
         } else {
-          statusEl.textContent = 'Source: LIVE';
-          statusEl.style.color = '#9cf';
+          const cnt = count;
+          statusEl.textContent = cnt > 0 ? (`Source: LIVE (${cnt} snapshots)`) : 'Source: LIVE';
+          statusEl.style.color = '#7dd3fc';
         }
-      }).catch(() => {});
+        if (diskInfoEl) {
+          if (s.snapshot_file) {
+            diskInfoEl.textContent = `Current snapshot file: ${s.snapshot_file}`;
+          } else if (s.snapshot_dir) {
+            diskInfoEl.textContent = `Snapshots directory: ${s.snapshot_dir}`;
+          } else {
+            diskInfoEl.textContent = 'Snapshots: in-memory only';
+          }
+        }
+        return s;
+      }).catch(() => null);
+    }
+
+    function useLatestCalibrationSnapshot() {
+      if (calibSnapshotCount <= 0) return;
+      selectCalibrationSnapshotByIndex(calibSnapshotCount - 1);
+    }
+
+    function selectCalibrationSnapshotByIndex(index) {
+      const idx = Number.parseInt(String(index), 10);
+      if (!Number.isFinite(idx)) return;
+      _statusApplying('cameraApplyStatus');
+      fetch('/api/calibration/snapshot/select', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ index: idx })
+      })
+        .then(r => {
+          if(!r.ok) throw new Error('select failed ' + r.status);
+          return r.json();
+        })
+        .then(() => {
+          _statusApplied('cameraApplyStatus');
+          refreshCalibrationSourceStatus();
+          refreshCalibrationOnce();
+        })
+        .catch(err => {
+          _statusError('cameraApplyStatus', err && err.message ? err.message : undefined);
+        });
+    }
+
+    function selectCalibrationSnapshotFromDropdown() {
+      if (calibSnapshotSelectSync) return;
+      const sel = document.getElementById('calibSnapshotSelect');
+      if (!sel || sel.disabled || !sel.value) return;
+      selectCalibrationSnapshotByIndex(sel.value);
     }
 
     function captureCalibrationSnapshot() {
@@ -380,6 +496,44 @@
       fetch('/api/calibration/live', { method:'POST' })
         .then(r => {
           if(!r.ok) throw new Error('live failed ' + r.status);
+          return r.json();
+        })
+        .then(() => {
+          _statusApplied('cameraApplyStatus');
+          refreshCalibrationSourceStatus();
+          refreshCalibrationOnce();
+        })
+        .catch(err => {
+          _statusError('cameraApplyStatus', err && err.message ? err.message : undefined);
+        });
+    }
+
+    function prevCalibrationSnapshot() {
+      const btn = document.getElementById('calibPrevBtn');
+      if (btn && btn.disabled) return;
+      _statusApplying('cameraApplyStatus');
+      fetch('/api/calibration/snapshot/prev', { method:'POST' })
+        .then(r => {
+          if(!r.ok) throw new Error('prev failed ' + r.status);
+          return r.json();
+        })
+        .then(() => {
+          _statusApplied('cameraApplyStatus');
+          refreshCalibrationSourceStatus();
+          refreshCalibrationOnce();
+        })
+        .catch(err => {
+          _statusError('cameraApplyStatus', err && err.message ? err.message : undefined);
+        });
+    }
+
+    function nextCalibrationSnapshot() {
+      const btn = document.getElementById('calibNextBtn');
+      if (btn && btn.disabled) return;
+      _statusApplying('cameraApplyStatus');
+      fetch('/api/calibration/snapshot/next', { method:'POST' })
+        .then(r => {
+          if(!r.ok) throw new Error('next failed ' + r.status);
           return r.json();
         })
         .then(() => {
@@ -420,9 +574,11 @@
 
     function toggleCalibration() {
       const enabled = document.getElementById('CalibrationMode').checked;
+      const controls = document.getElementById('calibrationControls');
       const box = document.getElementById('calibBox');
       const img2 = document.getElementById('calibFrame');
-      if (!box || !img2) return;
+      if (!controls || !box || !img2) return;
+      controls.style.display = enabled ? 'block' : 'none';
       box.style.display = enabled ? 'block' : 'none';
       if (calibTimer) {
         clearInterval(calibTimer);
@@ -440,14 +596,58 @@
 
     document.addEventListener('keydown', (ev) => {
       const tag = (ev.target && ev.target.tagName ? ev.target.tagName.toLowerCase() : '');
-      if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+      const snapshotSel = document.getElementById('calibSnapshotSelect');
+      const isSnapshotSelect = !!snapshotSel && ev.target === snapshotSel;
+      const inEditor = (tag === 'input' || tag === 'textarea' || tag === 'select');
+      if (ev.altKey && ev.code === 'ArrowLeft') {
+        ev.preventDefault();
+        prevCalibrationSnapshot();
+        return;
+      }
+      if (ev.altKey && ev.code === 'ArrowRight') {
+        ev.preventDefault();
+        nextCalibrationSnapshot();
+        return;
+      }
+      if ((ev.code === 'Comma' || ev.key === ',' || ev.key === '<') && isSnapshotSelect) {
+        ev.preventDefault();
+        prevCalibrationSnapshot();
+        return;
+      }
+      if ((ev.code === 'Period' || ev.key === '.' || ev.key === '>') && isSnapshotSelect) {
+        ev.preventDefault();
+        nextCalibrationSnapshot();
+        return;
+      }
+      if (inEditor) return;
       if (ev.code === 'KeyC') {
         captureCalibrationSnapshot();
       }
       if (ev.code === 'KeyL') {
         useCalibrationLive();
       }
+      if (ev.code === 'Comma' || ev.key === ',' || ev.key === '<') {
+        prevCalibrationSnapshot();
+      }
+      if (ev.code === 'Period' || ev.key === '.' || ev.key === '>') {
+        nextCalibrationSnapshot();
+      }
     });
+
+    const calibSnapshotSelectEl = document.getElementById('calibSnapshotSelect');
+    if (calibSnapshotSelectEl) {
+      calibSnapshotSelectEl.addEventListener('keydown', (ev) => {
+        if (ev.code === 'Comma' || ev.key === ',' || ev.key === '<') {
+          ev.preventDefault();
+          prevCalibrationSnapshot();
+          return;
+        }
+        if (ev.code === 'Period' || ev.key === '.' || ev.key === '>') {
+          ev.preventDefault();
+          nextCalibrationSnapshot();
+        }
+      });
+    }
 
     function startShooting() {
       _statusApplying('shootingApplyStatus');

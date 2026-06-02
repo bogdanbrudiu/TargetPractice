@@ -20,7 +20,7 @@ import numpy as np
 import shutil
 
 from .targets import load_target, ITarget
-from .detector import USBCameraSource, BrightSpotDetector, Hit
+from .detector import USBCameraSource, BrightSpotDetector, Hit, seeded_component_mask
 from .overlay import draw_overlay
 from .config import parse_ini, parse_weapon, write_weapon, AppConfig
 from .session import Session
@@ -54,9 +54,18 @@ class AppState:
         self.last_frame_path: Optional[Path] = None
         self.last_frame_name: Optional[str] = None
         self.last_raw_frame: Optional[np.ndarray] = None
+        self.calib_snapshots: List[np.ndarray] = []
+        self.calib_snapshot_ts: List[float] = []
+        self.calib_snapshot_files: List[Optional[str]] = []
+        self.calib_snapshot_index: int = -1
         self.calib_frozen_frame: Optional[np.ndarray] = None
         self.calib_frozen_ts: Optional[float] = None
+        self.calib_frozen_file: Optional[str] = None
         self.calib_use_frozen: bool = False
+        self.calib_debug_dir = latest_dir / "calib_debug"
+        self.calib_debug_dir.mkdir(parents=True, exist_ok=True)
+        self.calib_snapshots_dir = self.calib_debug_dir / "snapshots"
+        self.calib_snapshots_dir.mkdir(parents=True, exist_ok=True)
         # detector tuning (for calibration/debug UI)
         self.detector_threshold: int = 230
         self.detector_min_area: int = 5
@@ -757,6 +766,22 @@ async def api_calibration_frame(view: str = "thresh"):
     img_area = float(frame.shape[0] * frame.shape[1])
     max_area = max(float(min_area), img_area * 0.02)
 
+    def _draw_calibration_detection_marker(out_img: np.ndarray, center: Optional[Tuple[int, int]], detected: bool) -> None:
+        h, w = out_img.shape[:2]
+        badge_w = min(w - 12, 320)
+        badge_y1 = max(0, h - 44)
+        cv2.rectangle(out_img, (6, badge_y1), (6 + badge_w, h - 8), (0, 0, 0), -1)
+        if detected and center is not None:
+            cx, cy = center
+            r = max(10, min(h, w) // 24)
+            cv2.circle(out_img, (cx, cy), r + 7, (0, 0, 0), 3)
+            cv2.circle(out_img, (cx, cy), r + 4, (0, 255, 255), 3)
+            cv2.circle(out_img, (cx, cy), r, (0, 0, 255), 2)
+            cv2.drawMarker(out_img, (cx, cy), (255, 255, 255), cv2.MARKER_CROSS, r * 2, 2)
+            cv2.putText(out_img, "SPOT DETECTED", (14, h - 18), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 255), 2, cv2.LINE_AA)
+        else:
+            cv2.putText(out_img, "NO SPOT DETECTED", (14, h - 18), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 120, 255), 2, cv2.LINE_AA)
+
     if view == "red":
         # Mirror the detector's red masking (HSV) so tuning is easier.
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
@@ -777,6 +802,7 @@ async def api_calibration_frame(view: str = "thresh"):
         total_cnts = len(cnts)
         kept = 0
         best = None
+        best_center = None
         best_area = 0.0
         for c in cnts:
             area = float(cv2.contourArea(c))
@@ -793,7 +819,9 @@ async def api_calibration_frame(view: str = "thresh"):
             if M["m00"] > 0:
                 cx = int(M["m10"] / M["m00"])
                 cy = int(M["m01"] / M["m00"])
-                cv2.circle(out, (cx, cy), 5, (0, 0, 255), -1)
+                best_center = (cx, cy)
+
+        _draw_calibration_detection_marker(out, best_center, best_center is not None)
 
         cv2.putText(
             out,
@@ -827,36 +855,46 @@ async def api_calibration_frame(view: str = "thresh"):
             (179, white_sat_max, 255),
         )
         top_hat = cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, np.ones((9, 9), np.uint8))
-        _, white_local = cv2.threshold(top_hat, 12, 255, cv2.THRESH_BINARY)
+        _, white_local = cv2.threshold(top_hat, 16, 255, cv2.THRESH_BINARY)
         white_mask = cv2.bitwise_and(white_mask, white_local)
         color_gate = cv2.bitwise_or(red_gate, white_mask)
 
         _, th = cv2.threshold(blur, thr, 255, cv2.THRESH_BINARY)
-        hybrid = cv2.bitwise_and(th, color_gate)
+        seed = cv2.bitwise_and(th, color_gate)
+        hybrid = seed
+        if cv2.countNonZero(hybrid) <= 0:
+            red_seed = cv2.bitwise_and(th, red_gate)
+            if cv2.countNonZero(red_seed) > 0:
+                hybrid = seeded_component_mask(th, red_seed, max_growth=max(2, red_gate_kernel // 2))
         hybrid = cv2.dilate(hybrid, kernel, iterations=1)
 
         cnts, _ = cv2.findContours(hybrid, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         out = cv2.cvtColor(hybrid, cv2.COLOR_GRAY2BGR)
         total_cnts = len(cnts)
         kept = 0
-        best = None
-        best_area = 0.0
+        best_center = None
         for c in cnts:
             area = float(cv2.contourArea(c))
             if area < float(min_area) or area > float(max_area):
                 continue
             kept += 1
-            if area > best_area:
-                best = c
-                best_area = area
             cv2.drawContours(out, [c], -1, (0, 255, 0), 1)
 
-        if best is not None:
-            M = cv2.moments(best)
-            if M["m00"] > 0:
-                cx = int(M["m10"] / M["m00"])
-                cy = int(M["m01"] / M["m00"])
-                cv2.circle(out, (cx, cy), 5, (0, 0, 255), -1)
+        # Use the same runtime detector logic for the marker center so preview and runtime match 1:1.
+        det_dbg = BrightSpotDetector(
+            threshold=thr,
+            min_area=min_area,
+            red_sat_min=red_sat_min,
+            red_val_min=red_val_min,
+            red_gate_kernel=red_gate_kernel,
+            white_sat_max=white_sat_max,
+            white_val_min=white_val_min,
+        )
+        hit_dbg = det_dbg.detect(frame)
+        if hit_dbg is not None:
+            best_center = (int(round(hit_dbg.x)), int(round(hit_dbg.y)))
+
+        _draw_calibration_detection_marker(out, best_center, best_center is not None)
 
         cv2.putText(
             out,
@@ -877,6 +915,7 @@ async def api_calibration_frame(view: str = "thresh"):
     total_cnts = len(cnts)
     kept = 0
     best = None
+    best_center = None
     best_area = 0.0
     for c in cnts:
         area = float(cv2.contourArea(c))
@@ -895,7 +934,14 @@ async def api_calibration_frame(view: str = "thresh"):
 
     if best is not None:
         # Highlight the best blob (largest kept) like the detector would pick.
-        cv2.drawContours(out, [best], -1, (255, 0, 0), 2)
+        cv2.drawContours(out, [best], -1, (255, 0, 255), 3)
+        M = cv2.moments(best)
+        if M["m00"] > 0:
+            cx = int(M["m10"] / M["m00"])
+            cy = int(M["m01"] / M["m00"])
+            best_center = (cx, cy)
+
+    _draw_calibration_detection_marker(out, best_center, best_center is not None)
 
     cv2.putText(
         out,
@@ -914,44 +960,294 @@ async def api_calibration_frame(view: str = "thresh"):
 async def api_calibration_snapshot_state():
     if state is None:
         return JSONResponse({"error": "uninitialized"}, status_code=503)
+    _sync_calibration_snapshots_from_disk()
+    count = len(getattr(state, "calib_snapshots", []))
+    index = int(getattr(state, "calib_snapshot_index", -1))
+    has_snapshot = count > 0 and 0 <= index < count and state.calib_frozen_frame is not None
+    snapshots = []
+    files = getattr(state, "calib_snapshot_files", [])
+    timestamps = getattr(state, "calib_snapshot_ts", [])
+    for i in range(count):
+        file_path = files[i] if i < len(files) else None
+        snapshots.append({
+            "index": i,
+            "ts": (timestamps[i] if i < len(timestamps) else None),
+            "file": file_path,
+            "name": (Path(file_path).name if file_path else None),
+        })
     return JSONResponse({
         "mode": ("snapshot" if getattr(state, "calib_use_frozen", False) else "live"),
-        "has_snapshot": state.calib_frozen_frame is not None,
+        "has_snapshot": has_snapshot,
         "snapshot_ts": getattr(state, "calib_frozen_ts", None),
+        "snapshot_file": getattr(state, "calib_frozen_file", None),
+        "snapshot_dir": str(getattr(state, "calib_snapshots_dir", "")),
+        "snapshot_count": count,
+        "snapshot_index": index,
+        "snapshots": snapshots,
+        "can_prev": has_snapshot and index > 0,
+        "can_next": has_snapshot and index < (count - 1),
     })
+
+
+def _save_calibration_snapshot_to_disk(frame: np.ndarray, ts: float, index: int) -> Optional[str]:
+    if state is None:
+        return None
+    try:
+        stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime(ts))
+        millis = int((ts - math.floor(ts)) * 1000)
+        filename = f"calib_{stamp}_{millis:03d}_{index:04d}.jpg"
+        out_path = state.calib_snapshots_dir / filename
+        ok = cv2.imwrite(str(out_path), frame)
+        if not ok:
+            return None
+        return str(out_path)
+    except Exception:
+        return None
+
+def _sync_calibration_snapshots_from_disk() -> None:
+    if state is None:
+        return
+    try:
+        disk_files = [p for p in sorted(state.calib_snapshots_dir.glob("*.jpg")) if p.is_file()]
+    except Exception:
+        return
+
+    memory_files = [str(p) for p in getattr(state, "calib_snapshot_files", []) if p]
+    disk_file_str = [str(p) for p in disk_files]
+    if memory_files == disk_file_str and len(state.calib_snapshots) == len(disk_file_str):
+        return
+
+    snapshots: List[np.ndarray] = []
+    timestamps: List[float] = []
+    files: List[Optional[str]] = []
+    for p in disk_files:
+        try:
+            img = cv2.imread(str(p))
+            if img is None:
+                continue
+            snapshots.append(img)
+            timestamps.append(float(p.stat().st_mtime))
+            files.append(str(p))
+        except Exception:
+            continue
+
+    state.calib_snapshots = snapshots
+    state.calib_snapshot_ts = timestamps
+    state.calib_snapshot_files = files
+
+    if len(snapshots) <= 0:
+        state.calib_snapshot_index = -1
+        state.calib_frozen_frame = None
+        state.calib_frozen_ts = None
+        state.calib_frozen_file = None
+        state.calib_use_frozen = False
+        return
+
+    if state.calib_snapshot_index < 0 or state.calib_snapshot_index >= len(snapshots):
+        state.calib_snapshot_index = len(snapshots) - 1
+    _set_calibration_snapshot_index(state.calib_snapshot_index)
 
 
 @app.post("/api/calibration/capture")
 async def api_calibration_capture():
     if state is None:
         return JSONResponse({"error": "uninitialized"}, status_code=503)
+    _sync_calibration_snapshots_from_disk()
     if state.last_raw_frame is None:
         return JSONResponse({"error": "no frame yet"}, status_code=409)
+    snap = None
     try:
-        state.calib_frozen_frame = state.last_raw_frame.copy()
+        snap = state.last_raw_frame.copy()
     except Exception:
-        state.calib_frozen_frame = state.last_raw_frame
-    state.calib_frozen_ts = time.time()
+        snap = state.last_raw_frame
+    ts = time.time()
+    state.calib_snapshots.append(snap)
+    state.calib_snapshot_ts.append(ts)
+    state.calib_snapshot_index = len(state.calib_snapshots) - 1
+    snap_file = _save_calibration_snapshot_to_disk(snap, ts, state.calib_snapshot_index)
+    state.calib_snapshot_files.append(snap_file)
+    state.calib_frozen_frame = state.calib_snapshots[state.calib_snapshot_index]
+    state.calib_frozen_ts = state.calib_snapshot_ts[state.calib_snapshot_index]
+    state.calib_frozen_file = state.calib_snapshot_files[state.calib_snapshot_index]
     state.calib_use_frozen = True
-    return JSONResponse({"ok": True, "mode": "snapshot", "snapshot_ts": state.calib_frozen_ts})
+    return JSONResponse({
+        "ok": True,
+        "mode": "snapshot",
+        "snapshot_ts": state.calib_frozen_ts,
+        "snapshot_file": state.calib_frozen_file,
+        "snapshot_dir": str(state.calib_snapshots_dir),
+        "snapshot_count": len(state.calib_snapshots),
+        "snapshot_index": state.calib_snapshot_index,
+    })
+
+
+def _set_calibration_snapshot_index(snapshot_index: int) -> bool:
+    if state is None:
+        return False
+    count = len(state.calib_snapshots)
+    if count <= 0:
+        state.calib_snapshot_index = -1
+        state.calib_frozen_frame = None
+        state.calib_frozen_ts = None
+        state.calib_frozen_file = None
+        return False
+    if snapshot_index < 0:
+        snapshot_index = 0
+    if snapshot_index >= count:
+        snapshot_index = count - 1
+    state.calib_snapshot_index = snapshot_index
+    state.calib_frozen_frame = state.calib_snapshots[snapshot_index]
+    state.calib_frozen_ts = state.calib_snapshot_ts[snapshot_index]
+    state.calib_frozen_file = state.calib_snapshot_files[snapshot_index]
+    return True
+
+
+@app.post("/api/calibration/snapshot/prev")
+async def api_calibration_snapshot_prev():
+    if state is None:
+        return JSONResponse({"error": "uninitialized"}, status_code=503)
+    _sync_calibration_snapshots_from_disk()
+    count = len(state.calib_snapshots)
+    if count <= 0:
+        return JSONResponse({"error": "no snapshots"}, status_code=409)
+    idx = int(getattr(state, "calib_snapshot_index", -1))
+    if idx <= 0:
+        return JSONResponse({"error": "at first snapshot"}, status_code=409)
+    if not _set_calibration_snapshot_index(idx - 1):
+        return JSONResponse({"error": "no snapshots"}, status_code=409)
+    state.calib_use_frozen = True
+    return JSONResponse({
+        "ok": True,
+        "mode": "snapshot",
+        "snapshot_ts": state.calib_frozen_ts,
+        "snapshot_file": state.calib_frozen_file,
+        "snapshot_dir": str(state.calib_snapshots_dir),
+        "snapshot_count": len(state.calib_snapshots),
+        "snapshot_index": state.calib_snapshot_index,
+    })
+
+
+@app.post("/api/calibration/snapshot/next")
+async def api_calibration_snapshot_next():
+    if state is None:
+        return JSONResponse({"error": "uninitialized"}, status_code=503)
+    _sync_calibration_snapshots_from_disk()
+    count = len(state.calib_snapshots)
+    if count <= 0:
+        return JSONResponse({"error": "no snapshots"}, status_code=409)
+    idx = int(getattr(state, "calib_snapshot_index", -1))
+    if idx >= (count - 1):
+        return JSONResponse({"error": "at last snapshot"}, status_code=409)
+    if not _set_calibration_snapshot_index(idx + 1):
+        return JSONResponse({"error": "no snapshots"}, status_code=409)
+    state.calib_use_frozen = True
+    return JSONResponse({
+        "ok": True,
+        "mode": "snapshot",
+        "snapshot_ts": state.calib_frozen_ts,
+        "snapshot_file": state.calib_frozen_file,
+        "snapshot_dir": str(state.calib_snapshots_dir),
+        "snapshot_count": len(state.calib_snapshots),
+        "snapshot_index": state.calib_snapshot_index,
+    })
+
+
+@app.post("/api/calibration/snapshot/select")
+async def api_calibration_snapshot_select(payload: dict = Body(...)):
+    if state is None:
+        return JSONResponse({"error": "uninitialized"}, status_code=503)
+    _sync_calibration_snapshots_from_disk()
+    try:
+        req_index = int(payload.get("index"))
+    except Exception:
+        return JSONResponse({"error": "invalid index"}, status_code=400)
+    if not _set_calibration_snapshot_index(req_index):
+        return JSONResponse({"error": "no snapshots"}, status_code=409)
+    state.calib_use_frozen = True
+    return JSONResponse({
+        "ok": True,
+        "mode": "snapshot",
+        "snapshot_ts": state.calib_frozen_ts,
+        "snapshot_file": state.calib_frozen_file,
+        "snapshot_dir": str(state.calib_snapshots_dir),
+        "snapshot_count": len(state.calib_snapshots),
+        "snapshot_index": state.calib_snapshot_index,
+    })
 
 
 @app.post("/api/calibration/live")
 async def api_calibration_live():
     if state is None:
         return JSONResponse({"error": "uninitialized"}, status_code=503)
+    _sync_calibration_snapshots_from_disk()
     state.calib_use_frozen = False
-    return JSONResponse({"ok": True, "mode": "live", "has_snapshot": state.calib_frozen_frame is not None})
+    return JSONResponse({
+        "ok": True,
+        "mode": "live",
+        "has_snapshot": state.calib_frozen_frame is not None,
+        "snapshot_file": state.calib_frozen_file,
+        "snapshot_dir": str(getattr(state, "calib_snapshots_dir", "")),
+        "snapshot_count": len(getattr(state, "calib_snapshots", [])),
+        "snapshot_index": getattr(state, "calib_snapshot_index", -1),
+    })
 
 
 @app.post("/api/calibration/clear")
 async def api_calibration_clear():
     if state is None:
         return JSONResponse({"error": "uninitialized"}, status_code=503)
-    state.calib_frozen_frame = None
-    state.calib_frozen_ts = None
-    state.calib_use_frozen = False
-    return JSONResponse({"ok": True, "mode": "live", "has_snapshot": False})
+    _sync_calibration_snapshots_from_disk()
+    count = len(state.calib_snapshots)
+    if count <= 0:
+        return JSONResponse({"error": "no snapshots"}, status_code=409)
+
+    idx = state.calib_snapshot_index
+    if idx < 0 or idx >= count:
+        idx = count - 1
+
+    file_to_delete = state.calib_snapshot_files[idx] if idx < len(state.calib_snapshot_files) else None
+    if file_to_delete:
+        try:
+            p = Path(file_to_delete)
+            if p.exists():
+                p.unlink()
+        except Exception:
+            pass
+
+    state.calib_snapshots.pop(idx)
+    state.calib_snapshot_ts.pop(idx)
+    state.calib_snapshot_files.pop(idx)
+
+    if len(state.calib_snapshots) <= 0:
+        state.calib_snapshot_index = -1
+        state.calib_frozen_frame = None
+        state.calib_frozen_ts = None
+        state.calib_frozen_file = None
+        state.calib_use_frozen = False
+        return JSONResponse({
+            "ok": True,
+            "mode": "live",
+            "has_snapshot": False,
+            "snapshot_file": None,
+            "snapshot_dir": str(getattr(state, "calib_snapshots_dir", "")),
+            "snapshot_count": 0,
+            "snapshot_index": -1,
+        })
+
+    if idx >= len(state.calib_snapshots):
+        idx = len(state.calib_snapshots) - 1
+    _set_calibration_snapshot_index(idx)
+    state.calib_use_frozen = True
+    return JSONResponse({
+        "ok": True,
+        "mode": "snapshot",
+        "has_snapshot": True,
+        "snapshot_ts": state.calib_frozen_ts,
+        "snapshot_file": state.calib_frozen_file,
+        "snapshot_dir": str(getattr(state, "calib_snapshots_dir", "")),
+        "snapshot_count": len(state.calib_snapshots),
+        "snapshot_index": state.calib_snapshot_index,
+    })
 
 
 def _read_target_settings(cfg_path: Path) -> dict:

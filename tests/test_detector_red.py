@@ -40,3 +40,19 @@ def test_red_halo_with_white_core_is_detected():
     assert hit is not None
     assert abs(hit.x - 200) <= 3
     assert abs(hit.y - 140) <= 3
+
+
+def test_red_spot_next_to_overexposed_bloom_is_detected():
+    # Real laser bloom can have a red lobe plus an adjacent blown-out white patch.
+    img = np.zeros((240, 320, 3), dtype=np.uint8)
+    cv2.circle(img, (180, 120), 4, (0, 0, 255), -1)
+    cv2.circle(img, (186, 120), 6, (255, 255, 255), -1)
+
+    det = BrightSpotDetector(threshold=220, min_area=2, red_gate_kernel=7)
+    hit = det.detect(img)
+
+    assert hit is not None
+    assert abs(hit.x - 183) <= 5
+    assert abs(hit.y - 120) <= 3
+
+

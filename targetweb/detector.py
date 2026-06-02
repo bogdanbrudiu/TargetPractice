@@ -5,6 +5,38 @@ import cv2
 import numpy as np
 
 
+def seeded_component_mask(binary_mask: np.ndarray, seed_mask: np.ndarray, max_growth: int = 8) -> np.ndarray:
+    """Grow seed pixels locally inside binary_mask without flooding the full component.
+
+    This bridges nearby overexposed bloom adjacent to a red-confirmed seed, while
+    avoiding the failure mode where an entire bright white sheet becomes one huge
+    accepted component.
+    """
+    if binary_mask is None or seed_mask is None:
+        return np.zeros((1, 1), dtype=np.uint8)
+    if binary_mask.shape[:2] != seed_mask.shape[:2]:
+        return np.zeros(binary_mask.shape[:2], dtype=np.uint8)
+
+    binary = np.where(binary_mask > 0, 255, 0).astype(np.uint8)
+    seeds = np.where(seed_mask > 0, 255, 0).astype(np.uint8)
+    if cv2.countNonZero(binary) <= 0 or cv2.countNonZero(seeds) <= 0:
+        return np.zeros_like(binary)
+
+    current = cv2.bitwise_and(binary, seeds)
+    if cv2.countNonZero(current) <= 0:
+        return np.zeros_like(binary)
+
+    kernel = np.ones((3, 3), np.uint8)
+    steps = max(1, int(max_growth))
+    for _ in range(steps):
+        grown = cv2.dilate(current, kernel, iterations=1)
+        next_mask = cv2.bitwise_and(binary, grown)
+        if cv2.countNonZero(cv2.absdiff(next_mask, current)) <= 0:
+            break
+        current = next_mask
+    return current
+
+
 @dataclass
 class Hit:
     x: float
@@ -148,13 +180,56 @@ class BrightSpotDetector:
         # Keep only local bright peaks, not the whole white paper background.
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         top_hat = cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, np.ones((9, 9), np.uint8))
-        _, white_local = cv2.threshold(top_hat, 12, 255, cv2.THRESH_BINARY)
+        _, white_local = cv2.threshold(top_hat, 16, 255, cv2.THRESH_BINARY)
         white = cv2.bitwise_and(white_base, white_local)
         color_gate = cv2.bitwise_or(red_gate, white)
-        mask = cv2.bitwise_and(th, color_gate)
+        seed = cv2.bitwise_and(th, color_gate)
+        mask = seed
+        # If no strict overlap is present, allow a small local grow from red-confirmed seed only.
+        if cv2.countNonZero(mask) <= 0:
+            red_seed = cv2.bitwise_and(th, red_gate)
+            if cv2.countNonZero(red_seed) > 0:
+                mask = seeded_component_mask(th, red_seed, max_growth=max(2, int(self.red_gate_kernel) // 2))
         # Mild cleanup only; avoid eroding tiny laser spots away.
         mask = cv2.dilate(mask, np.ones((3, 3), np.uint8), iterations=1)
         return mask
+
+    def _hit_from_hybrid(self, frame: np.ndarray) -> Optional[Hit]:
+        mask = self._hybrid_mask(frame)
+        cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not cnts:
+            return None
+
+        img_area = float(mask.shape[0] * mask.shape[1])
+        max_area = max(self.min_area, img_area * float(self.max_area_frac))
+        red = self._red_mask(frame)
+
+        best = None
+        best_score = None
+        for c in cnts:
+            area = float(cv2.contourArea(c))
+            if area < float(self.min_area) or area > float(max_area):
+                continue
+            local = np.zeros(mask.shape, dtype=np.uint8)
+            cv2.drawContours(local, [c], -1, 255, thickness=-1)
+            red_pixels = int(cv2.countNonZero(cv2.bitwise_and(red, local)))
+            # Prefer contours that actually include red support; then bigger area.
+            score = (1 if red_pixels > 0 else 0, red_pixels, area)
+            if best is None or score > best_score:
+                best = c
+                best_score = score
+
+        if best is None:
+            return None
+
+        (x, y), r = cv2.minEnclosingCircle(best)
+        M = cv2.moments(best)
+        if M["m00"] > 0:
+            cx = M["m10"] / M["m00"]
+            cy = M["m01"] / M["m00"]
+        else:
+            cx, cy = x, y
+        return Hit(x=float(cx), y=float(cy), strength=float(r))
 
     def _contour_is_red_dominant(self, frame: np.ndarray, contour: np.ndarray) -> bool:
         # Guard threshold-only candidates with a red dominance check.
@@ -213,6 +288,6 @@ class BrightSpotDetector:
     def detect(self, frame: np.ndarray) -> Optional[Hit]:
         # Use hybrid only so runtime detection matches calibration "hybrid" view.
         try:
-            return self._hit_from_mask(self._hybrid_mask(frame))
+            return self._hit_from_hybrid(frame)
         except Exception:
             return None
