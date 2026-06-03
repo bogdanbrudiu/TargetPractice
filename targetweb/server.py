@@ -138,6 +138,148 @@ def _ensure_placeholder(path: Path) -> None:
 _ensure_placeholder(DEFAULT_LATEST)
 
 
+def _target_detection_radius_px(target: ITarget) -> Optional[float]:
+    try:
+        hints = target.overlay_hint()
+    except Exception:
+        return None
+    radii = []
+    for kind, data in hints:
+        if kind in ("disc", "circle") and len(data) >= 3:
+            radii.append(float(data[2]))
+    if not radii:
+        return None
+    return max(radii)
+
+
+def _target_detection_margin_px(radius: float) -> float:
+    # Keep enough slack for slight target-position drift after restart/config offsets.
+    return max(30.0, radius * 0.50)
+
+
+def _hit_inside_target_window(hit: Optional[Hit], target: ITarget) -> bool:
+    if hit is None:
+        return False
+    radius = _target_detection_radius_px(target)
+    if radius is None:
+        return True
+    cx, cy = target.info.position_px
+    margin = _target_detection_margin_px(radius)
+    dx = float(hit.x) - float(cx)
+    dy = float(hit.y) - float(cy)
+    return ((dx * dx + dy * dy) ** 0.5) <= (radius + margin)
+
+
+def _best_target_scoped_hit(frame: np.ndarray, det: BrightSpotDetector, target: ITarget) -> Optional[Hit]:
+    radius = _target_detection_radius_px(target)
+    if radius is None:
+        return det.detect(frame)
+
+    try:
+        mask = det._hybrid_mask(frame)
+    except Exception:
+        return det.detect(frame)
+
+    cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not cnts:
+        return None
+
+    img_area = float(mask.shape[0] * mask.shape[1])
+    max_area = max(det.min_area, img_area * float(det.max_area_frac))
+    cx, cy = target.info.position_px
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    margin = _target_detection_margin_px(radius)
+
+    best = None
+    best_score = None
+    for c in cnts:
+        area = float(cv2.contourArea(c))
+        if area < float(det.min_area) or area > float(max_area):
+            continue
+        M = cv2.moments(c)
+        if M["m00"] <= 0:
+            continue
+        hit_x = float(M["m10"] / M["m00"])
+        hit_y = float(M["m01"] / M["m00"])
+        dist = ((hit_x - float(cx)) ** 2 + (hit_y - float(cy)) ** 2) ** 0.5
+        if dist > (radius + margin):
+            continue
+
+        local = np.zeros(mask.shape, dtype=np.uint8)
+        cv2.drawContours(local, [c], -1, 255, thickness=-1)
+        ys, xs = np.where(local > 0)
+        if len(xs) <= 0:
+            continue
+        vals = gray[ys, xs]
+        score = (int(vals.max()), float(vals.mean()), -dist, area)
+        if best is None or score > best_score:
+            (enc_x, enc_y), enc_r = cv2.minEnclosingCircle(c)
+            best = Hit(x=hit_x, y=hit_y, strength=float(enc_r))
+            best_score = score
+    return best
+
+
+def _best_target_white_hot_hit(frame: np.ndarray, det: BrightSpotDetector, target: ITarget) -> Optional[Hit]:
+    radius = _target_detection_radius_px(target)
+    if radius is None:
+        return None
+
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    cx, cy = target.info.position_px
+    margin = _target_detection_margin_px(radius)
+    yy, xx = np.indices(gray.shape)
+    roi_mask = (((xx - float(cx)) ** 2) + ((yy - float(cy)) ** 2)) <= ((radius + margin) ** 2)
+    # Keep fallback strict but practical for high-sensitivity settings where valid spots can be ~243-244.
+    white_thresh = min(
+        255,
+        max(
+            int(getattr(det, "white_val_min", 240)),
+            min(int(getattr(det, "threshold", 224)) - 10, 250),
+            242,
+        ),
+    )
+    mask = np.where(roi_mask & (gray >= white_thresh), 255, 0).astype(np.uint8)
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(mask)
+
+    best = None
+    best_score = None
+    for label in range(1, num_labels):
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        if area < 2 or area > 260:
+            continue
+        left = int(stats[label, cv2.CC_STAT_LEFT])
+        top = int(stats[label, cv2.CC_STAT_TOP])
+        width = int(stats[label, cv2.CC_STAT_WIDTH])
+        height = int(stats[label, cv2.CC_STAT_HEIGHT])
+        aspect = max(width, height) / max(1, min(width, height))
+        if aspect > 3.5:
+            continue
+        hit_x = float(centroids[label][0])
+        hit_y = float(centroids[label][1])
+        dist = ((hit_x - float(cx)) ** 2 + (hit_y - float(cy)) ** 2) ** 0.5
+        if dist > (radius + margin):
+            continue
+        vals = gray[labels == label]
+        if area < 8 and int(vals.max()) < 243:
+            continue
+        score = (int(vals.max()), -dist, float(vals.mean()), area, -aspect)
+        if best is None or score > best_score:
+            strength = max(width, height) / 2.0
+            best = Hit(x=hit_x, y=hit_y, strength=float(strength))
+            best_score = score
+    return best
+
+
+def _detect_hit_with_target_guard(frame: np.ndarray, det: BrightSpotDetector, target: ITarget) -> Optional[Hit]:
+    hit = det.detect(frame)
+    if _hit_inside_target_window(hit, target):
+        return hit
+    alt = _best_target_scoped_hit(frame, det, target)
+    if alt is not None:
+        return alt
+    return _best_target_white_hot_hit(frame, det, target)
+
+
 # Helper: list files in data dirs (targets/weapons)
 def _list_data_files(subdir: str, pattern: str = "*") -> List[str]:
     base = BASE.parent / "data" / subdir
@@ -221,6 +363,43 @@ def _apply_scale_position(state: Optional[AppState], scale: Optional[float], pos
             if abs(posx) < 4000 and abs(posy) < 4000:
                 bx, by = state.base_center
                 state.target.set_position(bx + posx, by + posy)
+    except Exception:
+        pass
+
+
+def _ensure_target_geometry_for_frame(state: Optional[AppState], frame: np.ndarray) -> None:
+    """Best-effort target baseline init for snapshot calibration when no live frame initialized yet."""
+    if state is None or frame is None:
+        return
+    try:
+        h, w = frame.shape[:2]
+    except Exception:
+        return
+
+    try:
+        current_size = getattr(state, "frame_size", None)
+        needs_init = (
+            getattr(state, "initial_p2mm", None) is None
+            or getattr(state, "base_center", None) is None
+            or current_size is None
+        )
+        if (not needs_init) and current_size == (w, h):
+            return
+
+        state.target.auto_scale((w, h))
+        state.target.set_position(w / 2.0, h / 2.0)
+        state.initial_p2mm = state.target.info.pixel_to_mm_scale
+        state.base_center = (w / 2.0, h / 2.0)
+        state.frame_size = (w, h)
+
+        if state.config_path is not None and state.config_path.exists():
+            cfg = parse_ini(state.config_path)
+            scale = cfg.scale if (cfg.scale is not None and cfg.scale > 0) else None
+            px = cfg.position_x
+            py = cfg.position_y
+            posx = px if abs(px) < 4000 else None
+            posy = py if abs(py) < 4000 else None
+            _apply_scale_position(state, scale, posx, posy)
     except Exception:
         pass
 
@@ -740,6 +919,9 @@ async def api_calibration_frame(view: str = "thresh"):
         except Exception:
             pass
 
+    # If app restarted without a successful live-frame init, bootstrap target geometry from this frame.
+    _ensure_target_geometry_for_frame(state, frame)
+
     if view == "raw":
         out = frame
         cv2.putText(out, "RAW", (10, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2, cv2.LINE_AA)
@@ -890,7 +1072,7 @@ async def api_calibration_frame(view: str = "thresh"):
             white_sat_max=white_sat_max,
             white_val_min=white_val_min,
         )
-        hit_dbg = det_dbg.detect(frame)
+        hit_dbg = _detect_hit_with_target_guard(frame, det_dbg, state.target)
         if hit_dbg is not None:
             best_center = (int(round(hit_dbg.x)), int(round(hit_dbg.y)))
 
@@ -1869,7 +2051,7 @@ def run_loop(camera_index: int,
                     tgt.set_position(cx + px, cy + py)
             first_frame = False
 
-        hit = det.detect(frame)
+        hit = _detect_hit_with_target_guard(frame, det, tgt)
         # Reject very large blobs (usually glare) even if they pass contour area filtering.
         if hit is not None:
             try:

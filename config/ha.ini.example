@@ -2,32 +2,36 @@
 Webcam = Video Device
 FlipCamVertical = 0
 FlipCamHorizontal = 0
-VideoWidth = 1280
-VideoHeight = 720
-Sensitivity = 2.0
+VideoWidth = 1280.0
+VideoHeight = 720.0
+Sensitivity = 1.0
 Gain = 10.0
-RedSatMin = 70
-RedValMin = 70
-RedGateKernel = 7
-WhiteSatMax = 16
-WhiteValMin = 240
 
 ** Shooting settings **
 Shooter = ShooterName
-WeaponFilename = default_weapon.gun
+WeaponFilename = TAU7_4_5mm.gun
 Rounds = 10
 Timer = 120
 TimeLimit = 0
 Countdown = 0
 HitLimit = 0
-SLH = 5
+SLH = 10
 Prepare = 0
 
 ** Target settings **
 TargetFilename = 10m_air_pistol.tgt
-Scale = 1.0
-PositionX = 0
-PositionY = 0
+Scale = 0.333
+PositionX = 103.0
+PositionY = -64.0
 DistanceSimulated = 10.0
 DistanceReal = 5.0
 DistanceIsMetric = 1
+
+** Target settings **
+RedGateKernel = 7
+RedSatMin = 50
+RedValMin = 5
+
+** Target settings **
+WhiteValMin = 240
+WhiteSatMax = 15
