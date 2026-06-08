@@ -31,6 +31,7 @@ class AppConfig:
     time_limit: Optional[int] = None
     countdown: Optional[int] = None
     hit_limit: Optional[int] = None
+    continuous_mode: Optional[int] = None
     slh: Optional[int] = None
     prepare: Optional[int] = None
 
@@ -183,6 +184,11 @@ def parse_ini(path: Path) -> AppConfig:
         elif k == "HitLimit":
             try:
                 cfg.hit_limit = int(float(v))
+            except ValueError:
+                pass
+        elif k == "ContinuousMode":
+            try:
+                cfg.continuous_mode = int(float(v))
             except ValueError:
                 pass
         elif k == "SLH":

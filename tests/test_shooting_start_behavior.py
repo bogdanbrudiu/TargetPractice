@@ -63,3 +63,33 @@ def test_rounds_auto_stop_even_if_hitlimit_disabled(tmp_path):
 
     state_now = client.get("/api/state").json()
     assert state_now.get("shooting_status") == "finished"
+
+
+def test_continuous_mode_resets_and_keeps_running(tmp_path):
+    client = _build_client(
+        tmp_path,
+        "\n".join(
+            [
+                "** Shooting settings **",
+                "Prepare = 0",
+                "Rounds = 2",
+                "HitLimit = 1",
+                "ContinuousMode = 1",
+                "",
+            ]
+        ),
+    )
+
+    r = client.post("/api/shooting/start")
+    assert r.status_code == 200
+    assert r.json().get("shooting_status") == "running"
+
+    assert server.state is not None
+    with server.state.session_lock:
+        server.state.session.add(10, 10, 10.0)
+        server.state.session.add(20, 20, 9.0)
+
+    state_now = client.get("/api/state").json()
+    assert state_now.get("shooting_status") == "running"
+    assert state_now.get("shooting_hits") == 0
+    assert state_now.get("shots") == []

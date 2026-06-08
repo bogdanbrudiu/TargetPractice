@@ -56,3 +56,15 @@ def test_red_spot_next_to_overexposed_bloom_is_detected():
     assert abs(hit.y - 120) <= 3
 
 
+def test_dim_red_spot_on_black_background_is_detected_by_local_contrast_fallback():
+    img = np.zeros((240, 320, 3), dtype=np.uint8)
+    cv2.circle(img, (150, 100), 4, (0, 0, 120), -1)
+
+    det = BrightSpotDetector(threshold=220, min_area=2, red_gate_kernel=7)
+    hit = det.detect(img)
+
+    assert hit is not None
+    assert abs(hit.x - 150) <= 4
+    assert abs(hit.y - 100) <= 4
+
+

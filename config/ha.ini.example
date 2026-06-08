@@ -15,6 +15,7 @@ Timer = 120
 TimeLimit = 0
 Countdown = 0
 HitLimit = 0
+ContinuousMode = 0
 SLH = 10
 Prepare = 0
 

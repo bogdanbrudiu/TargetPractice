@@ -90,6 +90,8 @@ class AppState:
         self.shooting_time_countdown_enabled: bool = False
         self.shooting_hit_limit_enabled: bool = False
         self.shooting_hit_limit_rounds: int = 0
+        self.shooting_continuous_mode: bool = False
+        self.shooting_prepare_seconds: int = 0
         self.last_recorded_ts: float = 0.0
         # One-shot latch to avoid repeated records from persistent hotspots.
         self.hit_record_armed: bool = True
@@ -610,7 +612,43 @@ def _shooting_tick(now_ts: float) -> None:
                 start_idx = int(getattr(state, "shooting_start_shot_index", 0))
                 shots_since = max(0, total_shots - start_idx)
                 if shots_since >= rounds:
-                    state.shooting_status = "finished"
+                    if getattr(state, "shooting_continuous_mode", False):
+                        _reset_session_locked(state)
+                        _start_shooting_cycle_locked(state, now_ts)
+                    else:
+                        state.shooting_status = "finished"
+
+
+def _reset_session_locked(app_state: AppState) -> None:
+    cx, cy = app_state.target.info.position_px
+    app_state.session = Session(
+        out_dir=app_state.sessions_dir,
+        target_filename=app_state.target.info.filename,
+        cx=cx,
+        cy=cy,
+        scale=app_state.target.info.pixel_to_mm_scale,
+    )
+    app_state.last_hit = None
+    app_state.shooting_start_shot_index = 0
+    app_state.hit_record_armed = True
+    app_state.hit_nohit_frames = 0
+    app_state.last_recorded_ts = 0.0
+
+
+def _start_shooting_cycle_locked(app_state: AppState, now_ts: float) -> None:
+    prepare_seconds = max(0, int(getattr(app_state, "shooting_prepare_seconds", 0)))
+    app_state.shooting_start_shot_index = len(getattr(app_state.session, "shots", []))
+    app_state.shooting_running_start_ts = None
+    app_state.shooting_prepare_end_ts = now_ts + prepare_seconds
+    app_state.shooting_status = "prepare" if prepare_seconds > 0 else "running"
+    app_state.hit_record_armed = True
+    app_state.hit_nohit_frames = 0
+    app_state.last_hit = None
+    if app_state.shooting_status == "running":
+        app_state.shooting_running_start_ts = now_ts
+        app_state.last_recorded_ts = now_ts
+    else:
+        app_state.last_recorded_ts = 0.0
 
 
 @app.get("/")
@@ -680,6 +718,7 @@ async def api_state():
                     "TimeLimit": cfg.get("TimeLimit"),
                     "Countdown": cfg.get("Countdown"),
                     "HitLimit": cfg.get("HitLimit"),
+                    "ContinuousMode": cfg.get("ContinuousMode"),
                     "SLH": cfg.get("SLH"),
                     "Prepare": cfg.get("Prepare"),
                 }
@@ -727,6 +766,7 @@ async def api_state():
                 "TimeLimit": cfg.get("TimeLimit"),
                 "Countdown": cfg.get("Countdown"),
                 "HitLimit": cfg.get("HitLimit"),
+                "ContinuousMode": cfg.get("ContinuousMode"),
                 "SLH": cfg.get("SLH"),
                 "Prepare": cfg.get("Prepare"),
             }
@@ -798,6 +838,7 @@ async def api_shooting_start():
 
     hit_limit_rounds = int(cfg.rounds or 0)
     hit_limit_enabled_cfg = bool(int(cfg.hit_limit or 0))
+    continuous_mode = bool(int(cfg.continuous_mode or 0))
     # Rounds>0 should enforce an auto-stop even if HitLimit checkbox is off.
     hit_limit_enabled = hit_limit_enabled_cfg or (hit_limit_rounds > 0)
     if hit_limit_enabled and hit_limit_rounds <= 0:
@@ -805,23 +846,14 @@ async def api_shooting_start():
 
     now_ts = time.time()
     with state.session_lock:
-        state.shooting_start_shot_index = len(getattr(state.session, "shots", []))
         state.shooting_time_limit_enabled = time_limit_enabled
         state.shooting_time_limit_seconds = time_limit_seconds
         state.shooting_time_countdown_enabled = bool(int(cfg.countdown or 0))
         state.shooting_hit_limit_enabled = hit_limit_enabled
         state.shooting_hit_limit_rounds = hit_limit_rounds
-        state.shooting_running_start_ts = None
-        state.shooting_prepare_end_ts = now_ts + prepare_seconds
-        state.shooting_status = "prepare" if prepare_seconds > 0 else "running"
-        state.hit_record_armed = True
-        state.hit_nohit_frames = 0
-        if state.shooting_status == "running":
-            state.shooting_running_start_ts = now_ts
-            state.last_recorded_ts = now_ts
-        else:
-            state.last_recorded_ts = 0.0
-        state.last_hit = None
+        state.shooting_continuous_mode = continuous_mode
+        state.shooting_prepare_seconds = prepare_seconds
+        _start_shooting_cycle_locked(state, now_ts)
 
     try:
         _shooting_tick(now_ts)
@@ -851,22 +883,11 @@ async def api_shooting_reset():
     if state is None:
         return JSONResponse({"error": "uninitialized"}, status_code=503)
     with state.session_lock:
-        cx, cy = state.target.info.position_px
-        state.session = Session(
-            out_dir=state.sessions_dir,
-            target_filename=state.target.info.filename,
-            cx=cx,
-            cy=cy,
-            scale=state.target.info.pixel_to_mm_scale,
-        )
-        state.last_hit = None
+        _reset_session_locked(state)
         state.shooting_status = "idle"
         state.shooting_prepare_end_ts = None
         state.shooting_running_start_ts = None
-        state.shooting_start_shot_index = 0
-        state.hit_record_armed = True
-        state.hit_nohit_frames = 0
-        state.last_recorded_ts = 0.0
+        state.shooting_prepare_seconds = 0
     return JSONResponse({"ok": True, **_shooting_snapshot(time.time())})
 
 
@@ -1048,6 +1069,9 @@ async def api_calibration_frame(view: str = "thresh"):
             red_seed = cv2.bitwise_and(th, red_gate)
             if cv2.countNonZero(red_seed) > 0:
                 hybrid = seeded_component_mask(th, red_seed, max_growth=max(2, red_gate_kernel // 2))
+        if cv2.countNonZero(hybrid) <= 0:
+            _, red_local = cv2.threshold(top_hat, 8, 255, cv2.THRESH_BINARY)
+            hybrid = cv2.bitwise_and(red_gate, red_local)
         hybrid = cv2.dilate(hybrid, kernel, iterations=1)
 
         cnts, _ = cv2.findContours(hybrid, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -1458,6 +1482,7 @@ def _read_target_settings(cfg_path: Path) -> dict:
         "TimeLimit": cfg.time_limit,
         "Countdown": cfg.countdown,
         "HitLimit": cfg.hit_limit,
+        "ContinuousMode": cfg.continuous_mode,
         "SLH": cfg.slh,
         "Prepare": cfg.prepare,
     }
@@ -1557,6 +1582,7 @@ async def api_set_config(payload: dict = Body(...)):
         "TimeLimit",
         "Countdown",
         "HitLimit",
+        "ContinuousMode",
         "SLH",
         "Prepare",
     }
@@ -1579,7 +1605,7 @@ async def api_set_config(payload: dict = Body(...)):
         except Exception:
             pass
     # integer-like shooting settings
-    for key in ("Rounds", "Timer", "TimeLimit", "Countdown", "HitLimit", "SLH", "Prepare", "RedSatMin", "RedValMin", "RedGateKernel", "WhiteSatMax", "WhiteValMin"):
+    for key in ("Rounds", "Timer", "TimeLimit", "Countdown", "HitLimit", "ContinuousMode", "SLH", "Prepare", "RedSatMin", "RedValMin", "RedGateKernel", "WhiteSatMax", "WhiteValMin"):
         if key in updates and updates[key] is not None:
             try:
                 updates[key] = int(float(updates[key]))

@@ -190,6 +190,11 @@ class BrightSpotDetector:
             red_seed = cv2.bitwise_and(th, red_gate)
             if cv2.countNonZero(red_seed) > 0:
                 mask = seeded_component_mask(th, red_seed, max_growth=max(2, int(self.red_gate_kernel) // 2))
+        # Dark targets can keep the red spot below the global threshold. Fall back to
+        # local contrast, but only inside the red-confirmed gate.
+        if cv2.countNonZero(mask) <= 0:
+            _, red_local = cv2.threshold(top_hat, 8, 255, cv2.THRESH_BINARY)
+            mask = cv2.bitwise_and(red_gate, red_local)
         # Mild cleanup only; avoid eroding tiny laser spots away.
         mask = cv2.dilate(mask, np.ones((3, 3), np.uint8), iterations=1)
         return mask

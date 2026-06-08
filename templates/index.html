@@ -197,6 +197,8 @@
           <input id="Countdown" type="checkbox" onchange="saveShootingConfig()" />
           <label for="HitLimit">HitLimit</label>
           <input id="HitLimit" type="checkbox" onchange="saveShootingConfig()" />
+          <label for="ContinuousMode">Continuous mode</label>
+          <input id="ContinuousMode" type="checkbox" onchange="saveShootingConfig()" />
           <label for="SLH">SLH (Show Last Hit)</label>
           <input id="SLH" type="number" step="1" onchange="saveShootingConfig()" />
           <label for="Prepare">Prepare (sec)</label>
@@ -305,6 +307,7 @@
         if (c.TimeLimit != null) document.getElementById('TimeLimit').value = c.TimeLimit;
         if (c.Countdown != null) document.getElementById('Countdown').checked = !!c.Countdown;
         if (c.HitLimit != null) document.getElementById('HitLimit').checked = !!c.HitLimit;
+        if (c.ContinuousMode != null) document.getElementById('ContinuousMode').checked = !!c.ContinuousMode;
         if (c.SLH != null) document.getElementById('SLH').value = c.SLH;
         if (c.Prepare != null) document.getElementById('Prepare').value = c.Prepare;
       }).catch(err => console.error('config fetch failed', err));
@@ -747,6 +750,7 @@
         TimeLimit: parseInt(document.getElementById('TimeLimit').value),
         Countdown: document.getElementById('Countdown').checked ? 1 : 0,
         HitLimit: document.getElementById('HitLimit').checked ? 1 : 0,
+        ContinuousMode: document.getElementById('ContinuousMode').checked ? 1 : 0,
         SLH: parseInt(document.getElementById('SLH').value),
         Prepare: parseInt(document.getElementById('Prepare').value),
       };
