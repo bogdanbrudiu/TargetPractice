@@ -35,5 +35,25 @@ python3 -m pip install -r requirements-dev.txt
 python3 -m pytest -q
 ```
 
+### Debug false triggers
+Each recorded trigger is saved to `run/hit_debug/`.
+
+- JPEG filename includes timestamp, source, and trigger coordinates, for example `20260608_143015_123_auto_x318_y227_s95.jpg`
+- `run/hit_debug/hits.csv` contains one row per trigger with detector settings and empty `label` / `notes` columns you can edit later
+- A practical workflow is to review the JPEGs at the end of the day, mark `label=good` or `label=false` in the CSV, then use those examples to tune thresholds with evidence
+
+### Easier labeling (no manual CSV edit)
+You can label by moving images into folders and then syncing:
+
+1. Move real hits into `run/hit_debug/good/`
+2. Move false hits into `run/hit_debug/false/`
+3. Run sync command:
+
+```bash
+python -m targetweb.hit_debug_labels --debug-dir run/hit_debug
+```
+
+This updates only the `label` column in `hits.csv` (`good` / `false`) for matching filenames.
+
 ### Attribution reminder
 If you publish this repo, consider keeping a short acknowledgements section for inspiration sources (e.g. HomeLESS, LaserGunTargetCaster) and verify any upstream license requirements if you reuse code/assets (or redistribute bundled third-party data files under `data/`).

@@ -75,3 +75,4 @@ Note: this repository includes third-party target/weapon definition files under 
 - Circle target parsing: line 1 name, line 2 type (0 metric, 2 imperial), next 10 lines diameters, line 13 is marked ring index (1-based). Imperial diameters converted to mm.
 - Scaling emulates HomeLESS: pixel-to-mm scale derives from frame height and the largest diameter.
 - Detection is intentionally simple for prototyping and can be swapped out.
+- Every recorded trigger is also stored under `run/hit_debug/` with coordinates in the JPEG filename and a `hits.csv` index for later manual labeling (`label`, `notes`).

@@ -1,9 +1,11 @@
 from __future__ import annotations
 import argparse
+import csv
 import os
 import socket
 import time
 import math
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Tuple
 from threading import Lock
@@ -108,11 +110,15 @@ class AppState:
         # session CSV mirrors HomeLESS format, stored under latest_dir/sessions
         self.sessions_dir = latest_dir / "sessions"
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
+        self.hit_debug_dir = latest_dir / "hit_debug"
+        self.hit_debug_dir.mkdir(parents=True, exist_ok=True)
+        self.hit_debug_csv = self.hit_debug_dir / "hits.csv"
         cx, cy = target.info.position_px
         self.session = Session(out_dir=self.sessions_dir, target_filename=target.info.filename, cx=cx, cy=cy, scale=target.info.pixel_to_mm_scale)
         # active selection
         self.active_target_filename: str = target.info.filename
         self.active_weapon_filename: Optional[str] = None
+        _ensure_hit_debug_csv(self)
 
 
 app = FastAPI()
@@ -416,6 +422,114 @@ def _save_scale_only_to_config(state: AppState) -> None:
         _save_settings_to_ini(state.config_path, {"Scale": float(f"{cfg_scale:.4f}")})
     except Exception as ex:
         print(f"Config save failed: {ex}")
+
+
+def _ensure_hit_debug_csv(app_state: AppState) -> None:
+    if app_state.hit_debug_csv.exists():
+        return
+    headers = [
+        "ts_epoch",
+        "local_time",
+        "source",
+        "x",
+        "y",
+        "score",
+        "shooting_status",
+        "active_target",
+        "active_weapon",
+        "sensitivity",
+        "gain",
+        "threshold",
+        "min_area",
+        "red_sat_min",
+        "red_val_min",
+        "red_gate_kernel",
+        "white_sat_max",
+        "white_val_min",
+        "image_file",
+        "label",
+        "notes",
+    ]
+    with app_state.hit_debug_csv.open("w", encoding="utf-8", newline="") as f:
+        csv.writer(f).writerow(headers)
+
+
+def _debug_hit_filename(source: str, ts: float, hit: Hit, score: float) -> str:
+    stamp = datetime.fromtimestamp(ts).strftime("%Y%m%d_%H%M%S_%f")[:-3]
+    x = int(round(float(hit.x)))
+    y = int(round(float(hit.y)))
+    score10 = int(round(float(score) * 10.0))
+    return f"{stamp}_{source}_x{x}_y{y}_s{score10}.jpg"
+
+
+def _record_debug_hit(app_state: AppState, frame: Optional[np.ndarray], hit: Hit, score: float, source: str, ts: Optional[float] = None) -> None:
+    if frame is None:
+        return
+    try:
+        hit_ts = float(ts if ts is not None else time.time())
+    except Exception:
+        hit_ts = time.time()
+
+    cfg = AppConfig()
+    try:
+        if app_state.config_path is not None and app_state.config_path.exists():
+            cfg = parse_ini(app_state.config_path)
+    except Exception:
+        cfg = AppConfig()
+
+    filename = _debug_hit_filename(source, hit_ts, hit, score)
+    out_path = app_state.hit_debug_dir / filename
+    annotated = frame.copy()
+    try:
+        center = (int(round(float(hit.x))), int(round(float(hit.y))))
+        cv2.circle(annotated, center, 16, (0, 255, 255), 2)
+        cv2.circle(annotated, center, 4, (0, 255, 255), -1)
+        cv2.putText(
+            annotated,
+            f"{source.upper()} x={center[0]} y={center[1]} score={float(score):.1f}",
+            (12, 28),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            (0, 255, 255),
+            2,
+            cv2.LINE_AA,
+        )
+    except Exception:
+        pass
+
+    row = {
+        "ts_epoch": f"{hit_ts:.3f}",
+        "local_time": datetime.fromtimestamp(hit_ts).isoformat(timespec="milliseconds"),
+        "source": source,
+        "x": f"{float(hit.x):.2f}",
+        "y": f"{float(hit.y):.2f}",
+        "score": f"{float(score):.1f}",
+        "shooting_status": getattr(app_state, "shooting_status", ""),
+        "active_target": getattr(app_state, "active_target_filename", "") or "",
+        "active_weapon": getattr(app_state, "active_weapon_filename", "") or "",
+        "sensitivity": "" if cfg.sensitivity is None else f"{float(cfg.sensitivity):.2f}",
+        "gain": "" if cfg.gain is None else f"{float(cfg.gain):.2f}",
+        "threshold": str(int(getattr(app_state, "detector_threshold", 0))),
+        "min_area": str(int(getattr(app_state, "detector_min_area", 0))),
+        "red_sat_min": str(int(getattr(app_state, "detector_red_sat_min", 0))),
+        "red_val_min": str(int(getattr(app_state, "detector_red_val_min", 0))),
+        "red_gate_kernel": str(int(getattr(app_state, "detector_red_gate_kernel", 0))),
+        "white_sat_max": str(int(getattr(app_state, "detector_white_sat_max", 0))),
+        "white_val_min": str(int(getattr(app_state, "detector_white_val_min", 0))),
+        "image_file": filename,
+        "label": "",
+        "notes": "",
+    }
+
+    with app_state.write_lock:
+        try:
+            cv2.imwrite(str(out_path), annotated)
+            _ensure_hit_debug_csv(app_state)
+            with app_state.hit_debug_csv.open("a", encoding="utf-8", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=list(row.keys()))
+                writer.writerow(row)
+        except Exception as ex:
+            print(f"Hit debug save failed: {ex}")
 
 
 def _save_rendered_image(img: np.ndarray) -> None:
@@ -1981,6 +2095,7 @@ def run_loop(camera_index: int,
     def on_hid_trigger():
         if state is None:
             return
+        frame_snapshot = None
         with state.session_lock:
             # Match the UI's record gating: only count hits while running.
             if getattr(state, "shooting_status", "idle") != "running":
@@ -1994,6 +2109,15 @@ def run_loop(camera_index: int,
             s = tgt.get_points(h.x, h.y, caliber_mm)
             state.session.add(x=h.x, y=h.y, score=s)
             state.last_recorded_ts = time.time()
+            try:
+                if state.last_raw_frame is not None:
+                    frame_snapshot = state.last_raw_frame.copy()
+            except Exception:
+                frame_snapshot = None
+        try:
+            _record_debug_hit(state, frame_snapshot, h, s, "hid", ts=time.time())
+        except Exception:
+            pass
         print("HID trigger recorded")
     HIDListener(hid_cfg, on_hid_trigger).start()
 
@@ -2130,6 +2254,10 @@ def run_loop(camera_index: int,
                     state.hit_record_armed = False
                     state.hit_nohit_frames = 0
                     stable_hit_frames = 0
+                    try:
+                        _record_debug_hit(state, frame, hit, score, "auto", ts=now_ts)
+                    except Exception:
+                        pass
         else:
             prev_hit_xy = None
             stable_hit_frames = 0
