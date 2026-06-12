@@ -193,7 +193,7 @@ class BrightSpotDetector:
         # Dark targets can keep the red spot below the global threshold. Fall back to
         # local contrast, but only inside the red-confirmed gate.
         if cv2.countNonZero(mask) <= 0:
-            _, red_local = cv2.threshold(top_hat, 8, 255, cv2.THRESH_BINARY)
+            _, red_local = cv2.threshold(top_hat, 12, 255, cv2.THRESH_BINARY)
             mask = cv2.bitwise_and(red_gate, red_local)
         # Mild cleanup only; avoid eroding tiny laser spots away.
         mask = cv2.dilate(mask, np.ones((3, 3), np.uint8), iterations=1)

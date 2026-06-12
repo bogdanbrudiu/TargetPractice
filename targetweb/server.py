@@ -34,11 +34,15 @@ RECORD_DEBOUNCE_SECONDS = 0.10
 # Ignore detections briefly right after entering running state.
 SHOOTING_START_GRACE_SECONDS = 0.50
 # Require at least N close detections across consecutive frames before recording.
-HIT_CONFIRMATION_FRAMES = 1
+HIT_CONFIRMATION_FRAMES = 2
 # Max pixel drift between consecutive hits to treat them as the same candidate.
 HIT_CONFIRMATION_DISTANCE_PX = 20.0
 # Re-arm auto-record only after this many consecutive no-hit frames.
 HIT_RELEASE_FRAMES = 2
+# Require a visible local brightening so persistent hotspots do not re-trigger.
+HIT_NOVELTY_MEAN_DELTA = 3.0
+HIT_NOVELTY_PIXEL_DELTA = 12.0
+HIT_NOVELTY_PIXEL_RATIO = 0.10
 
 
 class AppState:
@@ -286,6 +290,41 @@ def _detect_hit_with_target_guard(frame: np.ndarray, det: BrightSpotDetector, ta
     if alt is not None:
         return alt
     return _best_target_white_hot_hit(frame, det, target)
+
+
+def _hit_has_novel_brightening(prev_frame: Optional[np.ndarray], frame: np.ndarray, hit: Hit) -> bool:
+    if prev_frame is None:
+        return True
+    if prev_frame.shape[:2] != frame.shape[:2]:
+        return True
+
+    prev_gray = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
+    curr_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+    radius = max(4, min(12, int(math.ceil(float(getattr(hit, "strength", 0.0))) + 2)))
+    cx = int(round(float(hit.x)))
+    cy = int(round(float(hit.y)))
+    x0 = max(0, cx - radius)
+    x1 = min(curr_gray.shape[1], cx + radius + 1)
+    y0 = max(0, cy - radius)
+    y1 = min(curr_gray.shape[0], cy + radius + 1)
+    if x0 >= x1 or y0 >= y1:
+        return False
+
+    prev_patch = prev_gray[y0:y1, x0:x1].astype(np.int16)
+    curr_patch = curr_gray[y0:y1, x0:x1].astype(np.int16)
+    if prev_patch.size <= 0 or curr_patch.size <= 0:
+        return False
+
+    delta = curr_patch - prev_patch
+    mean_delta = float(delta.mean())
+    rise_ratio = float((delta >= int(HIT_NOVELTY_PIXEL_DELTA)).mean())
+    peak_delta = float(delta.max())
+    return (
+        mean_delta >= float(HIT_NOVELTY_MEAN_DELTA)
+        and rise_ratio >= float(HIT_NOVELTY_PIXEL_RATIO)
+        and peak_delta >= 24.0
+    )
 
 
 # Helper: list files in data dirs (targets/weapons)
@@ -2170,6 +2209,8 @@ def run_loop(camera_index: int,
 
     prev_hit_xy: Optional[Tuple[float, float]] = None
     stable_hit_frames = 0
+    prev_frame_for_novelty: Optional[np.ndarray] = None
+    candidate_novelty_seen = False
 
     for frame in src.frames():
         _refresh_cfg_if_changed()
@@ -2219,18 +2260,22 @@ def run_loop(camera_index: int,
         score = None
         hit_xy = None
         if hit is not None:
+            novelty_ok = _hit_has_novel_brightening(prev_frame_for_novelty, frame, hit)
             hit_xy = (hit.x, hit.y)
             score = tgt.get_points(hit.x, hit.y, current_caliber_mm)
             state.last_hit = hit
             if prev_hit_xy is None:
                 stable_hit_frames = 1
+                candidate_novelty_seen = novelty_ok
             else:
                 dx = float(hit.x) - float(prev_hit_xy[0])
                 dy = float(hit.y) - float(prev_hit_xy[1])
                 if (dx * dx + dy * dy) <= (HIT_CONFIRMATION_DISTANCE_PX * HIT_CONFIRMATION_DISTANCE_PX):
                     stable_hit_frames += 1
+                    candidate_novelty_seen = candidate_novelty_seen or novelty_ok
                 else:
                     stable_hit_frames = 1
+                    candidate_novelty_seen = novelty_ok
             prev_hit_xy = (float(hit.x), float(hit.y))
             # Auto-record hits only while shooting is running
             with state.session_lock:
@@ -2247,6 +2292,7 @@ def run_loop(camera_index: int,
                     and past_start_grace
                     and record_armed
                     and stable_hit_frames >= HIT_CONFIRMATION_FRAMES
+                    and candidate_novelty_seen
                     and (now_ts - float(getattr(state, "last_recorded_ts", 0.0))) >= RECORD_DEBOUNCE_SECONDS
                 ):
                     state.session.add(x=hit.x, y=hit.y, score=score)
@@ -2254,6 +2300,7 @@ def run_loop(camera_index: int,
                     state.hit_record_armed = False
                     state.hit_nohit_frames = 0
                     stable_hit_frames = 0
+                    candidate_novelty_seen = False
                     try:
                         _record_debug_hit(state, frame, hit, score, "auto", ts=now_ts)
                     except Exception:
@@ -2261,6 +2308,7 @@ def run_loop(camera_index: int,
         else:
             prev_hit_xy = None
             stable_hit_frames = 0
+            candidate_novelty_seen = False
             with state.session_lock:
                 miss_frames = int(getattr(state, "hit_nohit_frames", 0)) + 1
                 state.hit_nohit_frames = miss_frames
@@ -2307,6 +2355,8 @@ def run_loop(camera_index: int,
                 mc.play_media(url, content_type="image/jpeg")
             except Exception as ex:
                 print(f"Chromecast play error: {ex}")
+
+        prev_frame_for_novelty = frame.copy()
 
 
 # --- CLI ---
